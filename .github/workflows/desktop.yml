@@ -28,7 +28,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config libasound2-dev libxkbcommon-dev \
-            libwayland-dev libx11-dev libxcb1-dev libudev-dev
+            libxkbcommon-x11-0 libwayland-dev libx11-dev libxcb1-dev \
+            libxkbcommon-x11-dev libudev-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -59,7 +60,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config libasound2-dev libxkbcommon-dev \
-            libwayland-dev libx11-dev libxcb1-dev libudev-dev
+            libxkbcommon-x11-0 libwayland-dev libx11-dev libxcb1-dev \
+            libxkbcommon-x11-dev libudev-dev
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -128,7 +130,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config libasound2-dev libxkbcommon-dev \
-            libwayland-dev libx11-dev libxcb1-dev libudev-dev
+            libxkbcommon-x11-0 libwayland-dev libx11-dev libxcb1-dev \
+            libxkbcommon-x11-dev libudev-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -192,7 +195,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config libasound2-dev libxkbcommon-dev \
-            libwayland-dev libx11-dev libxcb1-dev libudev-dev \
+            libxkbcommon-x11-0 libwayland-dev libx11-dev libxcb1-dev \
+            libxkbcommon-x11-dev libudev-dev \
             xvfb libgl1-mesa-dri
 
       - uses: dtolnay/rust-toolchain@stable
