@@ -65,6 +65,9 @@ it sends commands through a lock-free ring and reads atomics.
   browser.
 - **Per-pad ReplicantFX insert**: all 48 slots, dynamic six-parameter labels and
   factory defaults from the firmware table.
+- **VST3 and CLAP instruments**: put any installed plugin on a pad, open its own
+  editor inside the window, play it from the piano roll, and save its state with
+  the project.
 - **Sample import**: WAV, FLAC, MP3, OGG/Vorbis, AAC/M4A via Symphonia, with
   loop / one-shot and pitch.
 - **24-bit capture**: master take or single-pad stem, written by a dedicated
@@ -77,6 +80,46 @@ it sends commands through a lock-free ring and reads atomics.
 - **Desktop-native window**: grid on the left, inspector on the right, a
   responsive transport bar, keyboard shortcuts, and a headless screenshot mode
   used by CI.
+
+## VST3 / CLAP plugins
+
+Any VST3 or CLAP plugin installed on the machine can take over a pad:
+
+1. Click a pad, then **VST** in the inspector's engine row (or right-click the
+   pad → **PLUGIN**). The plugin browser opens and scans the platform's plugin
+   folders.
+2. Pick a plugin. It loads on the pad and its **own editor** opens inside the
+   window, filling the grid area.
+3. Double-click the pad any time to reopen the editor. **PIANO ROLL** switches to
+   the 16-step note editor: the plugin plays exactly what the wavetable engine
+   would, so a phrase can move between the two.
+4. The inspector shows the plugin's parameters as knobs (the first 64), and
+   **RELOAD STATE** re-applies what the project saved.
+
+Scan folders, in order: `REPLICANTSYNTH_PLUGIN_PATH`, then the platform defaults —
+`/usr/lib/clap`, `/usr/local/lib/clap`, `~/.clap`, `/usr/lib/vst3`,
+`/usr/local/lib/vst3`, `~/.vst3` on Linux; `/Library/Audio/Plug-Ins/{CLAP,VST3}`
+and `~/Library/Audio/Plug-Ins/...` on macOS; `%PROGRAMFILES%\Common Files\{CLAP,VST3}`
+on Windows.
+
+**Editors.** An embedded editor becomes a child of the application window, so it
+is clipped and moved with the region the UI reserves for it. CLAP editors need
+the host to drive their timers and file descriptors; VST3's VSTGUI editors need
+the host to service the run loop — both are pumped every frame. On Wayland, where
+a surface cannot parent another window, the plugin opens a detached editor
+window instead. Plugins that refuse to embed also fall back to their own window.
+
+**Audio path.** The plugin runs on its own worker thread, never on the audio
+callback. The engine hands it fixed 128-frame blocks through a bounded queue and
+plays back the block the worker finished one step earlier, so a plugin that
+stalls costs one block of audio (≈2.7 ms) instead of glitching the device. Its
+audio then flows through the same per-pad FX insert, mixer strip, meters and
+24-bit capture as the built-in engines.
+
+**State.** A project stores the plugin's format, bundle path, class id, name and
+its opaque state blob, so reopening a project restores the sound. A plugin that
+is missing on the machine is reported and left silent rather than failing the
+project load.
 
 ## Screenshots
 
@@ -98,6 +141,15 @@ it sends commands through a lock-free ring and reads atomics.
   <em>ReplicantWave piano roll · all 48 SP-404MKII slots · the channel strip riding a live level</em>
 </p>
 
+<p align="center">
+  <img src="screenshots/plugin_browser.png" width="290" alt="VST3 and CLAP plugin browser">
+  <img src="screenshots/plugin_vst3_editor.png" width="290" alt="Embedded VST3 editor (Dexed)">
+  <img src="screenshots/plugin_clap_editor.png" width="290" alt="Embedded CLAP editor (JC-303)">
+</p>
+<p align="center">
+  <em>The plugin browser · a VST3 editor (Dexed) and a CLAP editor (JC-303) embedded in the window</em>
+</p>
+
 Every capture comes from the running binary on Linux (X11, 1480 × 920), taken by
 `REPLICANTSYNTH_SCREENSHOT=… cargo run` — no mock-ups.
 
@@ -117,6 +169,7 @@ Every capture comes from the running binary on Linux (X11, 1480 × 920), taken b
 4. Press **Space** or **▶** to start the transport, then click pads `01`, `02`,
    `03` to launch the first scene. The `1 BAR` chip sets launch quantization.
 5. Click a pad to select it; the inspector shows **SOUND / FX / PATTERN / MIX**.
+   Press **VST** to host a VST3 or CLAP plugin on that pad instead.
 6. **Double-click a clip** to open its editor. **BROWSE** in SOUND opens the
    preset browser.
 7. **REC** captures the master, **STEM** captures the selected pad. Takes land
@@ -230,14 +283,25 @@ Windows). `cargo run --release -p replicantsynth-desktop` runs it directly.
 
 ## Verification
 
-- **Test suite** (`cargo test --release --workspace`): 26 tests.
+- **Test suite** (`cargo test --release --workspace`): 45 tests.
   13 in the engine — wavetable banks, the 303 voice, Wave polyphony, all 48 FX
   slots, launch quantization, scenes, sample playback, 24-bit capture, transport
   stop, the peak guard with eight simultaneous drum clips, the preset banks, JSON
   round-trip and a full demo render. 13 in the desktop shell — pad/note mapping,
   the Akai SysEx envelope, pad-mode and firmware parsing, the incremental MIDI
   parser (running status, split packets, zero-velocity note-on), the LED palette,
-  port roles, and Symphonia decoding of WAV, MP3, FLAC, OGG and M4A.
+  port roles, and Symphonia decoding of WAV, MP3, FLAC, OGG and M4A. 19 more in
+  the host crate — the bridge's block protocol, the plugin worker, VST3 manifest
+  parsing, and plugin discovery.
+- **Real plugins, real audio**: the host suite loads whatever is installed and
+  renders a MIDI note through it, asserting audible, bounded, finite output. On
+  the development machine that is Bazille (CLAP, 310 parameters) and Dexed (VST3,
+  2238 parameters); a machine without plugins skips those tests instead of
+  failing. A separate test routes the same note through the **clip engine** and
+  checks it reaches the master (peaks 0.26 and 0.10) and stops on transport stop.
+- **Editors, in the window**: screenshots taken of the running binary show a VST3
+  (Dexed) and a CLAP (JC-303) editor embedded as child windows, and the persisted
+  project restoring a plugin with its 6.2 kB state blob.
 - **Offline render**: a 42-second arrangement written through the real capture
   path, measured with `ffprobe` as `pcm_s24le`, 48 kHz stereo, peak −0.1 dBFS.
 - **Headless UI capture**: the app renders itself and writes a PNG
@@ -273,6 +337,12 @@ crates/replicantsynth-core/          engine, no I/O, no window, no device
   src/model/                         clips, presets, demo project, JSON store
   src/bin/render_demo.rs             offline arrangement renderer
   tests/engine.rs                    regression suite
+crates/replicantsynth-host/          VST3 and CLAP hosting
+  src/clap_backend.rs                CLAP host: audio, params, state, editor
+  src/vst3_backend.rs                VST3 host: audio, params, state, editor
+  src/scan.rs                        plugin discovery, never executes VST3 bundles
+  src/worker.rs                      the plugin's own thread
+  src/gui.rs                         the host-owned X11 child window
 crates/replicantsynth-desktop/       the application
   src/audio.rs                       cpal stream, device selection
   src/decode.rs                      Symphonia sample import
@@ -282,6 +352,16 @@ crates/replicantsynth-desktop/       the application
 
 ## Known limits / roadmap
 
+- **One plugin per pad**, and it must be an instrument or an insert-style effect:
+  there is no side-chain or multi-output routing, and the plugin replaces the
+  pad's engine rather than sitting beside it.
+- **Plugin editors embed on X11 only.** On Wayland the plugin draws its own
+  window; on macOS and Windows embedding is not wired yet, so editors open
+  detached there too.
+- **Scans do not execute VST3 bundles.** A bundle without a `moduleinfo.json` is
+  skipped, because loading one to ask its name is how a scanner ends up starting
+  Wine for a yabridge plugin. Point at such a plugin through
+  `REPLICANTSYNTH_PLUGIN_PATH` if you need it.
 - **One insert per pad.** ReplicantFX's dual-bus serial/parallel routing is a
   plug-in feature; 0.0.1 runs one selected slot per pad.
 - **The wavetable port is an architecture port**, not a byte-for-byte Rust port

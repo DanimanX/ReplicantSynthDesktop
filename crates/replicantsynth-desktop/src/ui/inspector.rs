@@ -508,6 +508,9 @@ fn sound(ui: &mut Ui, app: &mut App, pad: usize) {
                 }
             });
         }
+        ClipKind::Plugin => {
+            plugin_sound(ui, app, pad);
+        }
         ClipKind::Sample => {
             section_label(ui, "SAMPLE");
             let mut import = false;
@@ -574,6 +577,153 @@ fn sound(ui: &mut Ui, app: &mut App, pad: usize) {
     if changed {
         app.params_only(pad);
     }
+}
+
+/// The SOUND panel for a hosted plugin: identity, editor button and parameters.
+fn plugin_sound(ui: &mut Ui, app: &mut App, pad: usize) {
+    let Some(reference) = app.project.clips[pad].plugin.clone() else {
+        section_label(ui, "PLUGIN");
+        ui.label(
+            RichText::new("No plugin on this pad yet.")
+                .size(11.0)
+                .color(theme::DIM),
+        );
+        if chip(ui, "CHOOSE PLUGIN…", true).clicked() {
+            app.plugins.start_scan(false);
+            app.windows.plugin_browser = true;
+        }
+        return;
+    };
+
+    let accent = crate::plugins::plugin_accent();
+    section_label(ui, "HOSTED PLUGIN");
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            ui.label(RichText::new(&reference.name).size(13.0).strong());
+            ui.label(
+                RichText::new(format!(
+                    "{} · {}",
+                    reference.format.label(),
+                    if reference.vendor.trim().is_empty() {
+                        "unknown vendor"
+                    } else {
+                        reference.vendor.as_str()
+                    }
+                ))
+                .size(9.5)
+                .color(theme::DIM),
+            );
+        });
+    });
+    ui.label(
+        RichText::new(&reference.path)
+            .size(9.0)
+            .color(theme::DIM)
+            .monospace(),
+    );
+
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        let open = app.plugin_editor == Some(pad);
+        if chip(ui, if open { "CLOSE EDITOR" } else { "OPEN EDITOR" }, open).clicked() {
+            if open {
+                app.plugins.close_editor(pad);
+                app.plugin_editor = None;
+            } else {
+                app.plugin_editor = Some(pad);
+            }
+        }
+        if chip(ui, "REPLACE", false).clicked() {
+            app.plugins.start_scan(false);
+            app.windows.plugin_browser = true;
+        }
+    });
+    if let Some(loaded) = app.plugins.get(pad) {
+        if let Some(error) = &loaded.error {
+            ui.label(RichText::new(error).size(10.0).color(theme::RED));
+        }
+        ui.label(
+            RichText::new(format!(
+                "{} params · {} blocks rendered",
+                loaded.plugin.params().len(),
+                loaded.plugin.blocks_processed()
+            ))
+            .size(9.5)
+            .color(theme::DIM),
+        );
+    }
+
+    // Parameters, in groups, as knobs.
+    let Some(loaded) = app.plugins.get(pad) else {
+        ui.label(
+            RichText::new(
+                "The plugin is not loaded in this session; reload the project to restore it.",
+            )
+            .size(10.0)
+            .color(theme::AMBER),
+        );
+        return;
+    };
+    let params: Vec<_> = loaded.plugin.params().iter().take(64).cloned().collect();
+    if params.is_empty() {
+        ui.label(
+            RichText::new("This plugin exposes no parameters; use its editor.")
+                .size(10.5)
+                .color(theme::DIM),
+        );
+        return;
+    }
+
+    section_label(ui, "PARAMETERS");
+    let mut changes: Vec<(u32, f64)> = Vec::new();
+    ui.horizontal_wrapped(|ui| {
+        for param in &params {
+            let mut normalized = param.normalized() as f32;
+            let label = short_label(&param.name);
+            if knob(
+                ui,
+                &label,
+                &mut normalized,
+                0.0,
+                1.0,
+                Unit::Percent,
+                Some(param.default as f32),
+                accent,
+            ) {
+                changes.push((param.id, normalized as f64));
+            }
+        }
+    });
+    if let Some(loaded) = app.plugins.get_mut(pad) {
+        for (id, value) in changes {
+            loaded.plugin.set_param_normalized(id, value);
+        }
+    }
+    if params.len() > 64 {
+        ui.label(
+            RichText::new(format!(
+                "showing 64 of {} parameters — use the plugin's editor for the rest",
+                params.len()
+            ))
+            .size(9.5)
+            .color(theme::DIM),
+        );
+    }
+}
+
+/// Knob captions are narrow; keep the first word or two of the plugin's name.
+fn short_label(name: &str) -> String {
+    let mut label = String::new();
+    for word in name.split_whitespace().take(2) {
+        if !label.is_empty() {
+            label.push(' ');
+        }
+        label.push_str(word);
+    }
+    if label.chars().count() > 12 {
+        label = label.chars().take(11).collect::<String>() + "…";
+    }
+    label.to_uppercase()
 }
 
 fn fx(ui: &mut Ui, app: &mut App, pad: usize) {

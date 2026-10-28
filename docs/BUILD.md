@@ -75,6 +75,22 @@ Additional knobs: `REPLICANTSYNTH_SCREENSHOT_PAD` (0–63),
 `REPLICANTSYNTH_SCREENSHOT_EDITOR=1` and `REPLICANTSYNTH_SCREENSHOT_FX=1`. On a
 real desktop this needs `DISPLAY` or `WAYLAND_DISPLAY`; CI uses `xvfb-run`.
 
+## Plugin paths
+
+The `VST` engine scans for plugins at startup, on demand, and on **RESCAN**.
+`REPLICANTSYNTH_PLUGIN_PATH` adds directories ahead of the platform defaults:
+
+```bash
+REPLICANTSYNTH_PLUGIN_PATH="$HOME/audio/plugins/clap:$HOME/audio/plugins/vst3" \
+    cargo run --release -p replicantsynth-desktop
+```
+
+The host tests load whatever is installed. On a machine with no plugins they skip
+themselves and print why, so a fresh CI runner stays green without pretending it
+verified hosting.
+
+See [PLUGINS.md](PLUGINS.md) for the hosting model and troubleshooting.
+
 ## Data directory
 
 | OS | Path |

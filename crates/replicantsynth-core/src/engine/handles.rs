@@ -1,13 +1,15 @@
 //! The control surface between the UI/MIDI threads and the audio thread:
 //! a command ring, atomic telemetry, sample publication and capture taps.
 
+use super::plugin::{PluginBridge, PluginHostCommand};
 use super::recorder::RecordTap;
 use crate::dsp::FX_COUNT;
 use crate::model::{ClipKind, ClipState};
 use arc_swap::ArcSwapOption;
+use crossbeam_channel::{unbounded, Receiver, Sender};
 use crossbeam_queue::ArrayQueue;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 pub const PADS: usize = 64;
 pub const QUEUE_CAPACITY: usize = 8192;
@@ -259,10 +261,19 @@ pub struct EngineShared {
     pub master_gain: AtomicU32,
     pub sample_rate: AtomicU32,
     pub max_block: AtomicU32,
+    /// UI -> engine: attach or detach a hosted plugin bridge.
+    plugin_tx: Sender<PluginHostCommand>,
+    plugin_rx: Mutex<Option<Receiver<PluginHostCommand>>>,
+    /// Engine -> UI: bridges the engine has detached, to be dropped off the
+    /// audio thread.
+    plugin_retired_rx: Mutex<Receiver<PluginBridge>>,
+    plugin_retired_tx: Sender<PluginBridge>,
 }
 
 impl EngineShared {
     pub fn new() -> Self {
+        let (plugin_tx, plugin_rx) = unbounded();
+        let (plugin_retired_tx, plugin_retired_rx) = unbounded();
         Self {
             commands: ArrayQueue::new(QUEUE_CAPACITY),
             telemetry: Telemetry::new(),
@@ -277,6 +288,34 @@ impl EngineShared {
             master_gain: AtomicU32::new(0.85f32.to_bits()),
             sample_rate: AtomicU32::new(48_000),
             max_block: AtomicU32::new(512),
+            plugin_tx,
+            plugin_rx: Mutex::new(Some(plugin_rx)),
+            plugin_retired_tx,
+            plugin_retired_rx: Mutex::new(plugin_retired_rx),
+        }
+    }
+
+    /// Hand the install-command receiver to the engine. Called once, at
+    /// construction, so the mutex never runs on the audio thread.
+    pub fn take_plugin_receiver(&self) -> Option<Receiver<PluginHostCommand>> {
+        self.plugin_rx.lock().ok().and_then(|mut slot| slot.take())
+    }
+
+    pub fn plugin_sender(&self) -> Sender<PluginHostCommand> {
+        self.plugin_tx.clone()
+    }
+
+    /// Called by the engine when it detaches a bridge; the UI drains and drops
+    /// it, keeping plugin teardown off the audio thread.
+    pub fn retire_bridge(&self, bridge: PluginBridge) {
+        let _ = self.plugin_retired_tx.send(bridge);
+    }
+
+    /// Collect the bridges the engine has finished with. Dropping them here
+    /// releases the plugin worker.
+    pub fn drain_retired_bridges(&self) {
+        if let Ok(receiver) = self.plugin_retired_rx.lock() {
+            while receiver.try_recv().is_ok() {}
         }
     }
 
@@ -355,6 +394,17 @@ impl EngineHandles {
         &self.shared.samples
     }
 
+    /// Channel the UI uses to attach or detach hosted plugins.
+    pub fn plugin_sender(&self) -> Sender<PluginHostCommand> {
+        self.shared.plugin_sender()
+    }
+
+    /// Drop the bridges the engine has detached, which releases the plugin
+    /// workers they belong to.
+    pub fn drain_retired_bridges(&self) {
+        self.shared.drain_retired_bridges();
+    }
+
     pub fn master_tap(&self) -> Arc<RecordTap> {
         self.shared.master_tap.clone()
     }
@@ -398,7 +448,7 @@ impl EngineHandles {
         params: &[f32; 32],
     ) {
         let mut command = Command::new(CommandType::Configure, pad);
-        command.clip_kind = kind.clamp(0, 4) as u8;
+        command.clip_kind = kind.clamp(0, ClipKind::Plugin.ordinal()) as u8;
         command.root = root.clamp(0, 127) as i16;
         command.length = length.clamp(1, 16) as i16;
         command.fx_type = (fx_type.min(FX_COUNT - 1)) as i16;

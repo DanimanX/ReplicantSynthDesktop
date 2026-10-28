@@ -1,9 +1,9 @@
 [workspace]
-members = ["crates/replicantsynth-core", "crates/replicantsynth-desktop"]
+members = ["crates/replicantsynth-core", "crates/replicantsynth-host", "crates/replicantsynth-desktop"]
 resolver = "2"
 
 [workspace.package]
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT"

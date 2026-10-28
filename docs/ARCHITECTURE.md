@@ -141,6 +141,65 @@ compressor. Parameters are smoothed, and each clip owns an independent delay lin
 and comb bank. Memory is lazy in the sense that a `Clip` allocates its FX delay
 lines once at engine construction, on the UI thread, before the callback runs.
 
+## Plugin hosting
+
+A hosted VST3 or CLAP instrument is a fifth engine kind,
+`ClipKind::Plugin`. It differs from the built-in engines in one way that shapes
+everything else: its code is not ours, so it cannot run on the audio thread.
+
+### Three threads per plugin
+
+```
+UI thread            worker thread              audio thread
+PluginInstance  ───▶ PluginProcessor      ◀───  PluginBridge
+(editor, params,     (process(), set_param,      (tick(): fill a block,
+ state)               no UI, no locks)            read the previous one)
+```
+
+- The **instance** is `!Send`, lives on the UI thread, owns the editor and the
+  parameter/state extensions.
+- The **processor** is `Send`. `activate()` produces it on the UI thread and it
+  moves to a per-plugin worker thread that does nothing but render blocks.
+- The **bridge** maps the plugin onto the engine's clip model: `tick(in_l, in_r)`
+  fills a 128-frame block, flushes it when full, and returns one output sample.
+
+Blocks travel over bounded crossbeam channels, three deep each way. Both ends are
+non-blocking. A full outbound queue drops the block (so a slow plugin cannot
+back-pressure the device), and a full inbound queue in the worker counts an
+overrun instead of waiting (so shutting down cannot deadlock on a thread that
+stopped reading).
+
+### Why one block of latency
+
+The alternative — waiting for the plugin inside the callback — makes every plugin
+a potential audio glitch. Reading the previous block means the callback only ever
+touches its own buffers, and the worst case is one underrun of 128 frames.
+
+### Lifecycle
+
+1. `HostedPlugin::load` instantiates, enumerates parameters, negotiates the GUI
+   configuration, activates, and spawns the worker.
+2. The bridge is sent to the engine on a dedicated channel (it is not `Copy`, so
+   it cannot ride the fixed-size command queue) and installed on the pad.
+3. Detaching sends `Remove`; the engine hands the bridge back on a retirement
+   channel, and the UI thread drops it — which joins the worker and drops the
+   processor before the instance is deactivated. Plugin teardown never happens
+   on the audio thread.
+
+### Editors
+
+The UI reserves a rectangle, converts it to physical pixels, and the backend
+creates a child X11 window there. For CLAP the child is handed to `gui.set_parent`
+after the plugin's own GUI is created; for VST3 `Plugin::open_editor` receives the
+window id and creates its view inside it. Frames the host must pump:
+
+- CLAP: registered timers (`clap.timer`) and readable descriptors
+  (`clap.posix-fd`).
+- VST3: `service_run_loop()`.
+
+Without those, a VSTGUI editor is a correctly-sized blank rectangle — which is
+exactly what the first attempts produced.
+
 ## Desktop shell
 
 **Audio.** `audio::start_audio` picks the requested device (or the default),

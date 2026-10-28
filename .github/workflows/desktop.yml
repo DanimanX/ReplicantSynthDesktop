@@ -70,6 +70,9 @@ jobs:
           key: ${{ matrix.os }}
 
       - name: cargo test
+        # The host tests load whatever plugins the runner has and skip the rest,
+        # so this stays green on a bare runner without pretending it verified
+        # hosting. Installing a plugin in CI is a separate, deliberate step.
         run: cargo test --release --workspace
 
       - name: Offline demo render

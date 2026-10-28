@@ -39,15 +39,17 @@ pub enum ClipKind {
     Wave,
     Drums,
     Sample,
+    Plugin,
 }
 
 impl ClipKind {
-    pub const ALL: [ClipKind; 5] = [
+    pub const ALL: [ClipKind; 6] = [
         ClipKind::Empty,
         ClipKind::Acid,
         ClipKind::Wave,
         ClipKind::Drums,
         ClipKind::Sample,
+        ClipKind::Plugin,
     ];
 
     pub fn label(self) -> &'static str {
@@ -57,6 +59,7 @@ impl ClipKind {
             ClipKind::Wave => "WAVE",
             ClipKind::Drums => "DRUMS 909",
             ClipKind::Sample => "SAMPLE",
+            ClipKind::Plugin => "PLUGIN",
         }
     }
 
@@ -67,6 +70,7 @@ impl ClipKind {
             ClipKind::Wave => "WAVE",
             ClipKind::Drums => "909",
             ClipKind::Sample => "SMP",
+            ClipKind::Plugin => "VST",
         }
     }
 
@@ -77,6 +81,7 @@ impl ClipKind {
             ClipKind::Wave => 2,
             ClipKind::Drums => 3,
             ClipKind::Sample => 4,
+            ClipKind::Plugin => 5,
         }
     }
 
@@ -86,6 +91,7 @@ impl ClipKind {
             2 => ClipKind::Wave,
             3 => ClipKind::Drums,
             4 => ClipKind::Sample,
+            5 => ClipKind::Plugin,
             _ => ClipKind::Empty,
         }
     }
@@ -184,6 +190,56 @@ pub mod FxParam {
 pub const FX_PARAM_BASE: usize = FxParam::BASE;
 pub const FX_ENABLED_INDEX: usize = FxParam::ENABLED;
 
+/// The two plugin formats the host can load.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PluginFormat {
+    #[default]
+    Clap,
+    Vst3,
+}
+
+impl PluginFormat {
+    pub fn label(self) -> &'static str {
+        match self {
+            PluginFormat::Clap => "CLAP",
+            PluginFormat::Vst3 => "VST3",
+        }
+    }
+
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label.to_ascii_uppercase().as_str() {
+            "CLAP" => Some(PluginFormat::Clap),
+            "VST3" | "VST" => Some(PluginFormat::Vst3),
+            _ => None,
+        }
+    }
+}
+
+/// A hosted plugin attached to one pad.
+///
+/// `state` is the plugin's own opaque state blob, base64-encoded so the project
+/// file stays valid JSON and diffable.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PluginRef {
+    pub format: PluginFormat,
+    /// Absolute path of the `.clap` file or the `.vst3` bundle.
+    pub path: String,
+    /// CLAP plugin id, or the VST3 class id as hex.
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub vendor: String,
+    #[serde(default)]
+    pub state: Option<String>,
+}
+
+impl PluginRef {
+    /// Look up the engine ordinal for a plugin clip.
+    pub fn is_instrument_hint(&self) -> bool {
+        !self.id.is_empty()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Step {
     pub gate: bool,
@@ -254,6 +310,8 @@ pub struct Clip {
     pub fx_type: usize,
     pub fx_enabled: bool,
     pub params: [f32; PARAMS],
+    /// Set for `ClipKind::Plugin`: which plugin this pad hosts.
+    pub plugin: Option<PluginRef>,
 }
 
 impl Clip {
@@ -279,6 +337,7 @@ impl Clip {
             fx_type: 0,
             fx_enabled: false,
             params: [0.0; PARAMS],
+            plugin: None,
         }
     }
 
@@ -398,6 +457,7 @@ pub fn default_name(kind: ClipKind, index: usize) -> String {
         ClipKind::Wave => format!("WAVE {number}"),
         ClipKind::Drums => format!("909 {number}"),
         ClipKind::Sample => format!("SMP {number}"),
+        ClipKind::Plugin => format!("VST {number}"),
     }
 }
 
@@ -539,6 +599,26 @@ pub fn apply_kind_defaults(clip: &mut Clip, kind: ClipKind) {
                 clip.name = format!("SMP {:02}", clip.index + 1);
             }
         }
+        ClipKind::Plugin => {
+            clip.root = 60;
+            clip.reset_params();
+            clip.steps = [Step::default(); STEPS];
+            clip.sample_name = None;
+            clip.sample_path = None;
+            if clip.name.trim().is_empty() {
+                clip.name = clip
+                    .plugin
+                    .as_ref()
+                    .map(|plugin| plugin.name.clone())
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or_else(|| format!("VST {:02}", clip.index + 1));
+            }
+        }
+    }
+
+    // Only a plugin pad may carry a loaded plugin.
+    if kind != ClipKind::Plugin {
+        clip.plugin = None;
     }
 
     if kind != ClipKind::Empty && previous_fx != 0 {

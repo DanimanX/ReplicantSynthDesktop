@@ -9,7 +9,7 @@ The workspace version lives in the root `Cargo.toml`:
 
 ```toml
 [workspace.package]
-version = "0.0.1"
+version = "0.0.2"
 ```
 
 Both crates inherit it (`version.workspace = true`), so there is exactly one place

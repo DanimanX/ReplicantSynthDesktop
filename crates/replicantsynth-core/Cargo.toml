@@ -12,6 +12,7 @@ repository.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 crossbeam-queue.workspace = true
+crossbeam-channel = "0.5"
 arc-swap.workspace = true
 
 [[bin]]

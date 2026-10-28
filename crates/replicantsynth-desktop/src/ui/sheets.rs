@@ -26,6 +26,7 @@ fn wave_all() -> &'static [WavePreset] {
 }
 
 pub fn draw(ctx: &egui::Context, app: &mut App) {
+    plugin_browser(ctx, app);
     presets(ctx, app);
     fx_picker(ctx, app);
     midi_sheet(ctx, app);
@@ -34,6 +35,137 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
     settings(ctx, app);
     pad_menu(ctx, app);
     diagnostics(ctx, app);
+}
+
+/// Browse the VST3 / CLAP plugins installed on this machine.
+fn plugin_browser(ctx: &egui::Context, app: &mut App) {
+    if !app.windows.plugin_browser {
+        return;
+    }
+    let mut open = true;
+    let mut chosen: Option<usize> = None;
+    egui::Window::new("PLUGINS · VST3 / CLAP")
+        .open(&mut open)
+        .default_size([620.0, 540.0])
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut app.plugin_filter)
+                        .hint_text("search a plugin…")
+                        .desired_width(240.0),
+                );
+                if chip(ui, "RESCAN", app.plugins.scanning).clicked() {
+                    app.plugins.start_scan(true);
+                }
+                if app.plugins.scanning {
+                    ui.spinner();
+                    ui.label(RichText::new("scanning…").size(10.0).color(theme::DIM));
+                }
+            });
+
+            if let Some(error) = &app.plugins.scan_error {
+                ui.label(RichText::new(error).size(10.0).color(theme::RED));
+            }
+
+            let needle = app.plugin_filter.to_lowercase();
+            let total = app.plugins.available.len();
+            let instruments: Vec<usize> = app
+                .plugins
+                .available
+                .iter()
+                .enumerate()
+                .filter(|(_, plugin)| plugin.is_instrument)
+                .filter(|(_, plugin)| {
+                    needle.is_empty()
+                        || plugin.name.to_lowercase().contains(&needle)
+                        || plugin.vendor.to_lowercase().contains(&needle)
+                })
+                .map(|(index, _)| index)
+                .collect();
+            let effects: Vec<usize> = app
+                .plugins
+                .available
+                .iter()
+                .enumerate()
+                .filter(|(_, plugin)| !plugin.is_instrument)
+                .filter(|(_, plugin)| {
+                    needle.is_empty()
+                        || plugin.name.to_lowercase().contains(&needle)
+                        || plugin.vendor.to_lowercase().contains(&needle)
+                })
+                .map(|(index, _)| index)
+                .collect();
+
+            if total == 0 && !app.plugins.scanning {
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(
+                        "No plugins found. Looked in the CLAP and VST3 folders for this platform; \
+                         set REPLICANTSYNTH_PLUGIN_PATH to add a directory.",
+                    )
+                    .size(10.5)
+                    .color(theme::DIM),
+                );
+            }
+
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .max_height(400.0)
+                .show(ui, |ui| {
+                    for (title, list) in [("INSTRUMENTS", &instruments), ("EFFECTS", &effects)] {
+                        if list.is_empty() {
+                            continue;
+                        }
+                        ui.add_space(4.0);
+                        ui.label(RichText::new(title).size(9.5).color(theme::DIM).strong());
+                        for index in list {
+                            let plugin = &app.plugins.available[*index];
+                            let label = format!(
+                                "{:<34} {:<5} {}",
+                                truncate(&plugin.name, 34),
+                                plugin.format.label(),
+                                truncate(&plugin.vendor, 20)
+                            );
+                            if ui
+                                .selectable_label(false, label)
+                                .on_hover_text(plugin.path.display().to_string())
+                                .clicked()
+                            {
+                                chosen = Some(*index);
+                            }
+                        }
+                    }
+                });
+
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new(format!(
+                    "{total} plugin(s) · pad {:02} · the editor opens after loading",
+                    app.selected + 1
+                ))
+                .size(9.5)
+                .color(theme::DIM),
+            );
+        });
+
+    if let Some(index) = chosen {
+        let descriptor = app.plugins.available[index].clone();
+        let pad = app.selected;
+        app.load_plugin(pad, &descriptor);
+        open = false;
+    }
+    app.windows.plugin_browser = open;
+}
+
+fn truncate(text: &str, limit: usize) -> String {
+    if text.chars().count() <= limit {
+        text.to_string()
+    } else {
+        text.chars()
+            .take(limit.saturating_sub(1))
+            .collect::<String>()
+            + "…"
+    }
 }
 
 fn presets(ctx: &egui::Context, app: &mut App) {

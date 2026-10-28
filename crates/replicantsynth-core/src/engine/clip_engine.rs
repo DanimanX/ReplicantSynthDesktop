@@ -5,6 +5,7 @@
 //! no file I/O and no callbacks into the UI.
 
 use super::handles::{Command, CommandType, EngineShared, PadTelemetry, PADS};
+use super::plugin::{NoteEvent, PluginBridge, PluginHostCommand};
 use crate::dsp::drums::midi_note_to_instrument;
 use crate::dsp::{
     clampf, clampi, sanitize, shared_wavetable_banks, soft_limit, Acid303, DrumKit909, Effect,
@@ -85,6 +86,11 @@ pub struct Clip {
     acid: Acid303,
     wave: WaveSynth,
     drums: DrumKit909,
+
+    /// Set for `ClipKind::Plugin`: the bridge to the plugin worker thread.
+    pub plugin: Option<PluginBridge>,
+    /// Notes currently sounding on the hosted plugin, so a stop can release them.
+    plugin_notes: u128,
 }
 
 impl Clip {
@@ -115,6 +121,8 @@ impl Clip {
             acid: Acid303::new(),
             wave: WaveSynth::new(),
             drums: DrumKit909::new(),
+            plugin: None,
+            plugin_notes: 0,
         }
     }
 
@@ -170,11 +178,13 @@ pub struct ClipEngine {
     pad_peak_block: [f32; PADS],
     silent_buffer: Vec<f32>,
     pad_capture: Vec<f32>,
+    plugin_rx: Option<crossbeam_channel::Receiver<PluginHostCommand>>,
 }
 
 impl ClipEngine {
     pub fn new(shared: Arc<EngineShared>) -> Self {
         shared_wavetable_banks();
+        let plugin_rx = shared.take_plugin_receiver();
         let fx = (0..PADS).map(|_| Effect::new()).collect();
         let clips = (0..PADS).map(|_| Clip::new()).collect();
         let mut engine = Self {
@@ -191,6 +201,7 @@ impl ClipEngine {
             pad_peak_block: [0.0; PADS],
             silent_buffer: vec![0.0; 1024],
             pad_capture: vec![0.0; 1024],
+            plugin_rx,
         };
         engine.prepare(48_000.0, 512);
         engine
@@ -248,6 +259,7 @@ impl ClipEngine {
     // -----------------------------------------------------------------------
 
     fn drain_commands(&mut self) {
+        self.drain_plugin_commands();
         while let Some(command) = self.shared.commands.pop() {
             if (command.pad as usize) >= PADS {
                 continue;
@@ -379,6 +391,39 @@ impl ClipEngine {
         }
     }
 
+    /// Attach or detach hosted plugins. Bridges that are replaced are handed
+    /// back to the UI thread so the plugin itself is torn down there.
+    fn drain_plugin_commands(&mut self) {
+        let Some(receiver) = &self.plugin_rx else {
+            return;
+        };
+        while let Ok(command) = receiver.try_recv() {
+            match command {
+                PluginHostCommand::Install { pad, bridge } => {
+                    let pad = pad as usize;
+                    let bridge = *bridge;
+                    if pad >= PADS {
+                        self.shared.retire_bridge(bridge);
+                        continue;
+                    }
+                    if let Some(old) = self.clips[pad].plugin.replace(bridge) {
+                        self.shared.retire_bridge(old);
+                    }
+                    self.clips[pad].plugin_notes = 0;
+                }
+                PluginHostCommand::Remove { pad } => {
+                    let pad = pad as usize;
+                    if pad < PADS {
+                        if let Some(old) = self.clips[pad].plugin.take() {
+                            self.shared.retire_bridge(old);
+                        }
+                        self.clips[pad].plugin_notes = 0;
+                    }
+                }
+            }
+        }
+    }
+
     fn launch_clip(&mut self, pad: usize) {
         let kind = self.clips[pad].kind;
         if kind == 0 {
@@ -491,11 +536,14 @@ impl ClipEngine {
             clip.drum_vel = [[0; STEPS]; DRUM_VOICES];
         }
         self.shared.samples.clear(pad);
+        if let Some(bridge) = self.clips[pad].plugin.take() {
+            self.shared.retire_bridge(bridge);
+        }
         self.update_pad_state(pad);
     }
 
     fn apply_configure(&mut self, pad: usize, command: &Command) {
-        let kind = clampi(command.clip_kind as i32, 0, 4);
+        let kind = clampi(command.clip_kind as i32, 0, ClipKind::Plugin.ordinal());
         let previous_kind = self.clips[pad].kind;
         if kind != previous_kind {
             let clip = &mut self.clips[pad];
@@ -589,7 +637,8 @@ impl ClipEngine {
 
     fn apply_midi_note(&mut self, pad: usize, command: &Command) {
         let clip = &mut self.clips[pad];
-        if clip.kind != ClipKind::Wave.ordinal() {
+        // Wave instruments and hosted plugins both play the piano roll.
+        if clip.kind != ClipKind::Wave.ordinal() && clip.kind != ClipKind::Plugin.ordinal() {
             return;
         }
         let note = clampi(command.note as i32, 0, 127) as u8;
@@ -876,6 +925,18 @@ impl ClipEngine {
                     ClipKind::Drums => {
                         clip.drums.render(&mut l, &mut r);
                     }
+                    ClipKind::Plugin => {
+                        // The plugin runs on its own thread; the bridge hands
+                        // back the block that was rendered one step earlier.
+                        if let Some(bridge) = clip.plugin.as_mut() {
+                            bridge.bpm = bpm;
+                            bridge.playing = clip.state == 2;
+                            bridge.position = bridge.position.wrapping_add(1);
+                            let (out_l, out_r) = bridge.tick(0.0, 0.0);
+                            l = out_l;
+                            r = out_r;
+                        }
+                    }
                     ClipKind::Sample => {
                         let sample = samples.get(pad);
                         let Some(sample) = sample else {
@@ -1084,6 +1145,7 @@ fn start_clip(clip: &mut Clip) {
     clip.sample_pos = 0.0;
     clip.acid.all_notes_off();
     clip.wave.all_notes_off();
+    clip.plugin_notes = 0;
 }
 
 fn stop_clip(clip: &mut Clip, hard: bool, sample_rate: f64) {
@@ -1094,6 +1156,7 @@ fn stop_clip(clip: &mut Clip, hard: bool, sample_rate: f64) {
     clip.last_note = -1;
     clip.acid.all_notes_off();
     clip.wave.all_notes_off();
+    release_plugin_notes(&mut clip.plugin, &mut clip.plugin_notes);
     if hard {
         clip.tail_samples = 0.0;
         clip.sample_pos = 0.0;
@@ -1112,6 +1175,16 @@ fn stop_clip(clip: &mut Clip, hard: bool, sample_rate: f64) {
 
 fn trigger_step(clip: &mut Clip, step: i32) {
     let s = clampi(step, 0, STEPS as i32 - 1) as usize;
+    if clip.kind == ClipKind::Plugin.ordinal() {
+        trigger_plugin_step(
+            &clip.midi,
+            &mut clip.plugin,
+            &mut clip.plugin_notes,
+            clip.length,
+            s,
+        );
+        return;
+    }
     match ClipKind::from_ordinal(clip.kind) {
         ClipKind::Acid => {
             let cs = clip.steps[s];
@@ -1150,6 +1223,67 @@ fn trigger_step(clip: &mut Clip, step: i32) {
         }
         _ => {}
     }
+}
+
+/// Send the note on/off events for one 16th-note step to a hosted plugin.
+///
+/// The note model is the same one the wavetable piano roll uses, so switching a
+/// pad between Wave and a hosted instrument keeps its phrase.
+fn trigger_plugin_step(
+    midi: &[MidiSlot; MAX_MIDI_NOTES],
+    plugin: &mut Option<PluginBridge>,
+    active: &mut u128,
+    length: i32,
+    step: usize,
+) {
+    let Some(bridge) = plugin.as_mut() else {
+        return;
+    };
+    let loop_len = length.max(1) as usize;
+
+    // Releases first: a note ending here can be retriggered on the same step.
+    for note in midi.iter() {
+        if !note.active {
+            continue;
+        }
+        let span = (note.length as usize).clamp(1, loop_len);
+        let end_step = (note.start as usize + span) % loop_len;
+        if end_step == step && note_off_bit(active, note.note) {
+            bridge.push_event(NoteEvent::note_off(note.note, 0));
+        }
+    }
+    for note in midi.iter() {
+        if note.active && note.start as usize == step {
+            bridge.push_event(NoteEvent::note_on(note.note, note.velocity, 0));
+            *active |= 1u128 << (note.note & 0x7F);
+        }
+    }
+}
+
+#[inline]
+fn note_off_bit(active: &mut u128, note: u8) -> bool {
+    let mask = 1u128 << (note & 0x7F);
+    if *active & mask != 0 {
+        *active &= !mask;
+        true
+    } else {
+        false
+    }
+}
+
+/// Release everything a plugin pad is holding.
+fn release_plugin_notes(plugin: &mut Option<PluginBridge>, active: &mut u128) {
+    let Some(bridge) = plugin.as_mut() else {
+        *active = 0;
+        return;
+    };
+    let mut mask = *active;
+    while mask != 0 {
+        let note = mask.trailing_zeros() as u8;
+        bridge.push_event(NoteEvent::note_off(note, 0));
+        mask &= mask - 1;
+    }
+    *active = 0;
 }
 
 fn trigger_midi_step(clip: &mut Clip, step: usize) {

@@ -15,6 +15,8 @@ path = "src/main.rs"
 
 [dependencies]
 replicantsynth-core = { path = "../replicantsynth-core" }
+replicantsynth-host = { path = "../replicantsynth-host" }
+raw-window-handle = "0.6"
 eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
 egui = "0.31"
 cpal = "0.16"

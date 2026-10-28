@@ -13,7 +13,8 @@ pub mod model;
 
 pub use engine::{
     create_engine, sync_clip, sync_project, ClipEngine, Command, EngineHandles, EngineShared,
-    PadTelemetry, RecordTap, RecordingWriter, SampleData, SampleSlots, STEPS,
+    NoteEvent, PadTelemetry, PluginBlock, PluginBridge, RecordTap, RecordingWriter, SampleData,
+    SampleSlots, PLUGIN_BLOCK_FRAMES, STEPS,
 };
 pub use model::{Clip, ClipKind, ClipState, ProjectState};
 

@@ -62,6 +62,8 @@ struct ClipFile {
     drum_mask: Vec<u16>,
     #[serde(default)]
     drum_vel: Vec<Vec<u8>>,
+    #[serde(default)]
+    plugin: Option<crate::model::clip::PluginRef>,
 }
 
 fn default_root() -> i32 {
@@ -99,6 +101,7 @@ impl ClipFile {
             midi_notes: clip.midi_notes.clone(),
             drum_mask: clip.drum_mask.to_vec(),
             drum_vel: clip.drum_vel.iter().map(|row| row.to_vec()).collect(),
+            plugin: clip.plugin.clone(),
         }
     }
 
@@ -125,6 +128,7 @@ impl ClipFile {
             clip.steps[i] = *step;
         }
         clip.midi_notes = self.midi_notes;
+        clip.plugin = self.plugin;
         for (i, mask) in self.drum_mask.iter().take(DRUM_VOICES).enumerate() {
             clip.drum_mask[i] = *mask;
         }

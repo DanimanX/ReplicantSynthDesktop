@@ -4,6 +4,7 @@ mod app;
 mod audio;
 mod decode;
 mod midi;
+mod plugins;
 mod ui;
 
 fn main() -> eframe::Result<()> {

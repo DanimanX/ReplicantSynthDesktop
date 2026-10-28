@@ -3,6 +3,7 @@
 use crate::audio::{list_output_devices, start_audio, AudioHost, AudioOptions};
 use crate::decode::decode_file;
 use crate::midi::{self, ApcPadMode, Arrow, IncomingMidi, MidiHub, MidiMessage, PortRole};
+use crate::plugins::{descriptor_from_reference, PluginManager};
 use crate::ui::editor;
 use crate::ui::inspector;
 use crate::ui::pad_grid::{self, Snapshot};
@@ -65,6 +66,7 @@ pub struct Windows {
     pub project: bool,
     pub settings: bool,
     pub diagnostics: bool,
+    pub plugin_browser: bool,
     pub pad_menu: Option<usize>,
 }
 
@@ -105,6 +107,13 @@ pub struct App {
     pub dirty: bool,
     pub last_save: Instant,
     pub last_led_key: String,
+    pub plugins: PluginManager,
+    /// Which pad's plugin editor is currently open, if any.
+    pub plugin_editor: Option<usize>,
+    pub plugin_filter: String,
+    /// Set once the window handle is known, so the first embed can happen.
+    pub window_parent: Option<u64>,
+    plugins_restored: bool,
     screenshot: Option<ScreenshotPlan>,
 }
 
@@ -214,6 +223,11 @@ impl App {
             dirty: false,
             last_save: Instant::now(),
             last_led_key: String::new(),
+            plugins: PluginManager::new(),
+            plugin_editor: None,
+            plugin_filter: String::new(),
+            window_parent: None,
+            plugins_restored: false,
             screenshot: std::env::var("REPLICANTSYNTH_SCREENSHOT").ok().map(|path| {
                 ScreenshotPlan {
                     path: PathBuf::from(path),
@@ -265,6 +279,54 @@ impl App {
         if std::env::var("REPLICANTSYNTH_SCREENSHOT_FX").is_ok() {
             app.windows.fx_picker = true;
         }
+        if std::env::var("REPLICANTSYNTH_SCREENSHOT_PLUGINS").is_ok() {
+            app.plugins.start_scan(false);
+            app.windows.plugin_browser = true;
+        }
+        // Load a plugin onto the selected pad before the first frame, so a
+        // screenshot shows its editor embedded in the window.
+        if let Ok(query) = std::env::var("REPLICANTSYNTH_PLUGIN") {
+            let needle = query.to_lowercase();
+            let matches = |descriptor: &replicantsynth_host::PluginDescriptor| {
+                descriptor.name.to_lowercase().contains(&needle)
+                    || descriptor
+                        .path
+                        .to_string_lossy()
+                        .to_lowercase()
+                        .contains(&needle)
+            };
+            let mut found = app
+                .plugins
+                .available
+                .iter()
+                .find(|descriptor| matches(descriptor))
+                .cloned();
+            if found.is_none() {
+                app.plugins.start_scan(false);
+                // The scan is asynchronous; block for it, since this is a
+                // headless verification path, not the interactive one.
+                for _ in 0..400 {
+                    if app.plugins.poll_scan() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                found = app
+                    .plugins
+                    .available
+                    .iter()
+                    .find(|descriptor| matches(descriptor))
+                    .cloned();
+            }
+            match found {
+                Some(descriptor) => {
+                    let pad = app.selected;
+                    app.load_plugin(pad, &descriptor);
+                    app.plugin_editor = Some(pad);
+                }
+                None => eprintln!("REPLICANTSYNTH_PLUGIN={query}: no matching plugin"),
+            }
+        }
         app
     }
 
@@ -309,11 +371,115 @@ impl App {
     }
 
     pub fn set_kind(&mut self, pad: usize, kind: ClipKind) {
+        if kind == ClipKind::Plugin {
+            // A plugin pad is defined by the plugin it hosts, so choosing the
+            // engine means choosing the plugin.
+            self.select(pad);
+            self.plugins.start_scan(false);
+            self.windows.plugin_browser = true;
+            self.set_status("choose a VST3 or CLAP plugin for this pad");
+            return;
+        }
+        self.plugins.unload(pad, &self.handles);
+        if self.plugin_editor == Some(pad) {
+            self.plugin_editor = None;
+        }
         if let Some(clip) = self.project.clips.get_mut(pad) {
             apply_kind_defaults(clip, kind);
         }
         self.sync_pad(pad);
         self.set_status(format!("pad {:02} → {}", pad + 1, kind.label()));
+    }
+
+    /// Load a plugin onto a pad and make the pad a plugin clip.
+    pub fn load_plugin(&mut self, pad: usize, descriptor: &replicantsynth_host::PluginDescriptor) {
+        // A Wayland window cannot parent an X11 child, so ask for a detached
+        // editor there instead of failing to embed.
+        let prefer_floating = self.window_parent.is_none();
+
+        match self.plugins.load(
+            pad,
+            descriptor,
+            self.audio.sample_rate,
+            1024,
+            prefer_floating,
+            &self.handles,
+        ) {
+            Ok(reference) => {
+                if let Some(clip) = self.project.clips.get_mut(pad) {
+                    apply_kind_defaults(clip, ClipKind::Plugin);
+                    clip.name = descriptor.name.clone();
+                    // Instruments get an empty piano roll ready to play; effects
+                    // start bypassed-by-default only in the sense that they pass
+                    // audio through, which a plugin does on its own.
+                    clip.midi_notes.clear();
+                    clip.plugin = Some(reference);
+                }
+                self.select(pad);
+                self.sync_pad(pad);
+                self.set_status(format!(
+                    "{} {} loaded on pad {:02}",
+                    descriptor.format.label(),
+                    descriptor.name,
+                    pad + 1
+                ));
+                self.plugin_editor = Some(pad);
+                self.windows.plugin_browser = false;
+                self.dirty = true;
+            }
+            Err(error) => self.set_status(format!("cannot load plugin: {error}")),
+        }
+    }
+
+    /// Re-open the plugins a project references, restoring their saved state.
+    pub fn restore_project_plugins(&mut self) {
+        let pending: Vec<(usize, replicantsynth_core::model::PluginRef)> = self
+            .project
+            .clips
+            .iter()
+            .enumerate()
+            .filter(|(_, clip)| clip.kind == ClipKind::Plugin)
+            .filter_map(|(pad, clip)| clip.plugin.clone().map(|reference| (pad, reference)))
+            .collect();
+
+        for (pad, reference) in pending {
+            let descriptor = descriptor_from_reference(&reference);
+            if !std::path::Path::new(&reference.path).exists() {
+                self.set_status(format!(
+                    "pad {:02}: plugin missing at {}",
+                    pad + 1,
+                    reference.path
+                ));
+                continue;
+            }
+            let floating = self.window_parent.is_none();
+            match self.plugins.load(
+                pad,
+                &descriptor,
+                self.audio.sample_rate,
+                1024,
+                floating,
+                &self.handles,
+            ) {
+                Ok(_) => {
+                    if let Some(state) = reference.state.as_deref() {
+                        if let Some(bytes) = crate::plugins::base64_decode(state) {
+                            if let Some(loaded) = self.plugins.get_mut(pad) {
+                                if let Err(error) = loaded.plugin.restore_state(&bytes) {
+                                    eprintln!("pad {pad}: cannot restore plugin state: {error}");
+                                }
+                            }
+                        }
+                    }
+                    // Keep the saved name and reference, but sync the engine so
+                    // the pad plays.
+                    if let Some(clip) = self.project.clips.get(pad).cloned() {
+                        engine::sync_clip(&self.handles, &clip);
+                    }
+                }
+                Err(error) => self.set_status(format!("pad {:02}: {error}", pad + 1)),
+            }
+        }
     }
 
     pub fn launch(&mut self, pad: usize) {
@@ -550,6 +716,7 @@ impl App {
                 return;
             }
         }
+        self.plugins.capture_states(&mut self.project.clips);
         match model::store::save(&self.project, &self.project_path) {
             Ok(()) => {
                 self.dirty = false;
@@ -569,10 +736,13 @@ impl App {
         };
         match model::store::load(&path) {
             Ok(project) => {
+                self.plugins.shut_all(&self.handles);
+                self.plugin_editor = None;
                 self.project = project;
                 self.project_path = path;
                 self.sync_all();
                 self.load_project_samples();
+                self.restore_project_plugins();
                 self.set_status(format!("loaded {}", self.project_path.display()));
             }
             Err(err) => self.set_status(format!("load failed: {err}")),
@@ -580,12 +750,16 @@ impl App {
     }
 
     pub fn new_project(&mut self) {
+        self.plugins.shut_all(&self.handles);
+        self.plugin_editor = None;
         self.project = ProjectState::new();
         self.sync_all();
         self.set_status("new project");
     }
 
     pub fn load_demo(&mut self) {
+        self.plugins.shut_all(&self.handles);
+        self.plugin_editor = None;
         let sample = bundled_sample().and_then(|source| {
             copy_bundled_sample(&source, &data_dir().join("Samples/neon_stab.wav"))
         });
@@ -1119,6 +1293,32 @@ impl App {
     }
 
     fn central(&mut self, ctx: &egui::Context) {
+        // A plugin editor gets the whole window: these editors are often wider
+        // than the grid column, and a clipped synth panel is useless.
+        let editing = self
+            .plugin_editor
+            .filter(|pad| self.plugins.is_loaded(*pad));
+        if editing.is_none() {
+            self.plugin_editor = None;
+        }
+        if let Some(pad) = editing {
+            egui::CentralPanel::default()
+                .frame(
+                    egui::Frame::new()
+                        .fill(theme::BG)
+                        .inner_margin(egui::Margin {
+                            left: 10,
+                            right: 10,
+                            top: 8,
+                            bottom: 8,
+                        }),
+                )
+                .show(ctx, |ui| {
+                    self.plugin_editor_area(ui, pad);
+                });
+            return;
+        }
+
         egui::SidePanel::right("inspector")
             .exact_width(378.0)
             .resizable(false)
@@ -1159,6 +1359,9 @@ impl App {
                     self.select(pad);
                     self.windows.editor = true;
                 }
+                if let Some(pad) = response.plugin_editor {
+                    self.plugin_editor = Some(pad);
+                }
                 if let Some(pad) = response.context {
                     self.windows.pad_menu = Some(pad);
                 }
@@ -1174,11 +1377,213 @@ impl App {
             });
     }
 
+    /// Header plus the region reserved for an embedded plugin editor.
+    fn plugin_editor_area(&mut self, ui: &mut egui::Ui, pad: usize) {
+        let name = self
+            .project
+            .clips
+            .get(pad)
+            .and_then(|clip| clip.plugin.as_ref())
+            .map(|plugin| plugin.name.clone())
+            .unwrap_or_else(|| "plugin".to_string());
+        let accent = crate::plugins::plugin_accent();
+
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(format!("PLUGIN · PAD {:02}", pad + 1))
+                    .size(9.5)
+                    .color(theme::DIM),
+            );
+            ui.label(RichText::new(&name).size(14.0).strong().color(accent));
+            if let Some(loaded) = self.plugins.get(pad) {
+                if loaded.plugin.is_floating() {
+                    ui.label(
+                        RichText::new("editor is a separate window")
+                            .size(9.5)
+                            .color(theme::AMBER),
+                    );
+                }
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if widgets::chip(ui, "CLOSE", true).clicked() {
+                    self.plugins.close_editor(pad);
+                    self.plugin_editor = None;
+                }
+                if widgets::chip(ui, "PIANO ROLL", false).clicked() {
+                    self.plugins.close_editor(pad);
+                    self.plugin_editor = None;
+                    self.windows.editor = true;
+                }
+                if widgets::chip(ui, "RELOAD STATE", false).clicked() {
+                    self.reload_plugin_state(pad);
+                }
+            });
+        });
+        ui.add_space(4.0);
+
+        let area = ui.available_rect_before_wrap();
+        if area.width() < 40.0 || area.height() < 40.0 {
+            return;
+        }
+        let scale = ui.ctx().pixels_per_point();
+        let available = (
+            (area.width() * scale).round() as u32,
+            (area.height() * scale).round() as u32,
+        );
+
+        // A plugin editor has a size it wants. Reserve exactly that, centred:
+        // stretching a fixed-size editor leaves a dead black border instead.
+        // Once the editor exists, prefer the size it actually took, because a
+        // fixed-size plugin does not honour the size we asked for.
+        let preferred = self.plugins.preferred_size(pad).unwrap_or((640, 480));
+        let width = preferred.0.min(available.0).max(80);
+        let height = preferred.1.min(available.1).max(60);
+        let rect = replicantsynth_host::EditorRect {
+            x: ((area.left() * scale) + (available.0.saturating_sub(width)) as f32 / 2.0).round()
+                as i32,
+            y: ((area.top() * scale) + (available.1.saturating_sub(height)) as f32 / 2.0).round()
+                as i32,
+            width,
+            height,
+        };
+
+        // Paint the frame the child window sits in, so the editor looks placed
+        // rather than floating in a void.
+        let frame_rect = egui::Rect::from_min_size(
+            egui::pos2(
+                area.left() + (available.0.saturating_sub(width)) as f32 / 2.0 / scale,
+                area.top() + (available.1.saturating_sub(height)) as f32 / 2.0 / scale,
+            ),
+            egui::vec2(width as f32 / scale, height as f32 / scale),
+        );
+        let painter = ui.painter();
+        painter.rect_filled(
+            frame_rect,
+            egui::CornerRadius::same(6),
+            egui::Color32::from_rgb(11, 14, 20),
+        );
+        painter.rect_stroke(
+            frame_rect,
+            egui::CornerRadius::same(6),
+            egui::Stroke::new(1.0_f32, theme::LINE),
+            egui::StrokeKind::Inside,
+        );
+
+        let Some(parent) = self.window_parent else {
+            painter.text(
+                frame_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "This session has no X11 window to embed into.\nUse OPEN EDITOR to detach it.",
+                egui::FontId::proportional(12.0),
+                theme::DIM,
+            );
+            return;
+        };
+
+        if let Some(loaded) = self.plugins.get(pad) {
+            if loaded.plugin.editor_open() {
+                // Track what the plugin actually occupies: a fixed-size editor
+                // ignores the size we ask for, and the frame must match it.
+                if let Some((actual_w, actual_h)) = self.plugins.preferred_size(pad) {
+                    if actual_w > 0 && actual_h > 0 && (actual_w, actual_h) != (width, height) {
+                        let rect = replicantsynth_host::EditorRect {
+                            x: rect.x + ((width.saturating_sub(actual_w)) / 2) as i32,
+                            y: rect.y + ((height.saturating_sub(actual_h)) / 2) as i32,
+                            width: actual_w.min(available.0),
+                            height: actual_h.min(available.1),
+                        };
+                        self.plugins.set_editor_rect(pad, rect);
+                        return;
+                    }
+                }
+                self.plugins.set_editor_rect(pad, rect);
+                return;
+            }
+        }
+        // First open asks for the whole area: CLAP only reports its real size
+        // once the editor exists, and the tracking above then centres it.
+        if !self.plugins.open_editor(pad, Some(parent), rect) {
+            let message = self
+                .plugins
+                .get(pad)
+                .and_then(|loaded| loaded.error.clone())
+                .unwrap_or_else(|| "the plugin refused to open its editor".to_string());
+            painter.text(
+                frame_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                format!("{message}\n\nUse PIANO ROLL to edit notes instead."),
+                egui::FontId::proportional(12.0),
+                theme::AMBER,
+            );
+        }
+    }
+
+    /// Re-apply the state saved in the project to the live plugin.
+    pub fn reload_plugin_state(&mut self, pad: usize) {
+        let state = self
+            .project
+            .clips
+            .get(pad)
+            .and_then(|clip| clip.plugin.as_ref())
+            .and_then(|plugin| plugin.state.as_deref())
+            .and_then(crate::plugins::base64_decode);
+        let Some(bytes) = state else {
+            self.set_status("no saved state for this plugin yet");
+            return;
+        };
+        match self.plugins.get_mut(pad) {
+            Some(loaded) => match loaded.plugin.restore_state(&bytes) {
+                Ok(()) => self.set_status("plugin state restored"),
+                Err(error) => self.set_status(format!("restore failed: {error}")),
+            },
+            None => self.set_status("plugin is not loaded"),
+        }
+    }
+
     fn windows(&mut self, ctx: &egui::Context) {
         if self.windows.editor {
             editor::draw(ctx, self);
         }
         sheets::draw(ctx, self);
+    }
+
+    /// Find the native window so a plugin editor can be embedded as its child.
+    ///
+    /// Only X11 can host an embedded editor here: a Wayland surface has no
+    /// window id to parent, so in that case we leave this unset and plugins open
+    /// detached editors.
+    fn resolve_window_parent(&mut self, frame: &eframe::Frame) {
+        if self.window_parent.is_some() {
+            return;
+        }
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let Ok(handle) = frame.window_handle() else {
+            return;
+        };
+        match handle.as_raw() {
+            RawWindowHandle::Xlib(xlib) => self.window_parent = Some(xlib.window),
+            RawWindowHandle::Xcb(xcb) => self.window_parent = Some(u64::from(xcb.window.get())),
+            _ => {}
+        }
+    }
+
+    /// Re-attach the plugins the project references, once the window is known so
+    /// they can be created with the right editor mode.
+    fn restore_plugins_once(&mut self) {
+        if self.plugins_restored {
+            return;
+        }
+        let has_plugin_clips = self
+            .project
+            .clips
+            .iter()
+            .any(|clip| clip.kind == ClipKind::Plugin);
+        // Wait one frame for the handle to be resolved; by then a Wayland
+        // session has also had its chance to report a non-X11 handle.
+        if has_plugin_clips {
+            self.restore_project_plugins();
+        }
+        self.plugins_restored = true;
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
@@ -1234,11 +1639,19 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.resolve_window_parent(frame);
+        self.restore_plugins_once();
+
         self.snapshot = self.read_telemetry();
         self.audio.poll_error();
         self.handle_midi();
         self.push_apc_feedback();
+        self.plugins.poll(&self.handles);
+        if self.plugins.poll_scan() {
+            let count = self.plugins.available.len();
+            self.set_status(format!("{count} plugin(s) found"));
+        }
         self.autosave();
 
         if self.audio.error.is_some() {
@@ -1291,6 +1704,11 @@ impl eframe::App for App {
                                 eprintln!("screenshot {} failed: {err}", plan.path.display())
                             }
                         }
+                    }
+                    // Headless runs can also prove the save path, which is how
+                    // CI checks that plugin state survives a project file.
+                    if std::env::var("REPLICANTSYNTH_SCREENSHOT_SAVE").is_ok() {
+                        self.save_project(false);
                     }
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }

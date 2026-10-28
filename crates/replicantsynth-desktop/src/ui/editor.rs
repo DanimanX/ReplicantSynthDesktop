@@ -20,7 +20,7 @@ pub fn draw(ctx: &egui::Context, app: &mut App) {
         .show(ctx, |ui| match kind {
             ClipKind::Acid => acid_editor(ui, app, pad),
             ClipKind::Drums => drum_editor(ui, app, pad),
-            ClipKind::Wave => wave_editor(ui, app, pad),
+            ClipKind::Wave | ClipKind::Plugin => piano_roll(ui, app, pad),
             _ => {
                 ui.add_space(20.0);
                 ui.label(
@@ -380,17 +380,32 @@ fn drum_editor(ui: &mut Ui, app: &mut App, pad: usize) {
     }
 }
 
-fn wave_editor(ui: &mut Ui, app: &mut App, pad: usize) {
+/// The 16-step piano roll. Wave clips read it with the wavetable engine; plugin
+/// clips send the same notes to the hosted instrument, which is why switching a
+/// pad between the two keeps its phrase.
+fn piano_roll(ui: &mut Ui, app: &mut App, pad: usize) {
     header(ui, app, pad);
-    let bank = (app.project.clips[pad].params[WaveParam::BANK] as usize).min(7);
+    let kind = app.project.clips[pad].kind;
+    let accent = if kind == ClipKind::Plugin {
+        crate::plugins::plugin_accent()
+    } else {
+        theme::CYAN
+    };
     ui.horizontal(|ui| {
+        let source = if kind == ClipKind::Plugin {
+            app.project
+                .clips
+                .get(pad)
+                .and_then(|clip| clip.plugin.as_ref())
+                .map(|plugin| format!("HOSTED · {}", plugin.name))
+                .unwrap_or_else(|| "HOSTED PLUGIN".to_string())
+        } else {
+            let bank = (app.project.clips[pad].params[WaveParam::BANK] as usize).min(7);
+            format!("BANK {}", WAVETABLE_BANKS[bank])
+        };
+        ui.label(RichText::new(source).size(10.0).color(accent));
         ui.label(
-            RichText::new(format!("BANK {}", WAVETABLE_BANKS[bank]))
-                .size(10.0)
-                .color(theme::CYAN),
-        );
-        ui.label(
-            RichText::new("click: add a note · right-click: remove · click a note: remove")
+            RichText::new("click: add a note · click a note: remove")
                 .size(10.0)
                 .color(theme::DIM),
         );
@@ -464,9 +479,9 @@ fn wave_editor(ui: &mut Ui, app: &mut App, pad: usize) {
                                 rect.shrink(1.0),
                                 CornerRadius::same(2),
                                 if is_start {
-                                    theme::CYAN
+                                    accent
                                 } else {
-                                    theme::dim(theme::CYAN, 0.45)
+                                    theme::dim(accent, 0.45)
                                 },
                             );
                         }
@@ -513,7 +528,12 @@ fn wave_editor(ui: &mut Ui, app: &mut App, pad: usize) {
             app.project.clips[pad].midi_notes.clear();
             changed = true;
         }
-        if chip(ui, "LOAD PRESET", false).clicked() {
+        if kind == ClipKind::Plugin {
+            if chip(ui, "PLUGIN EDITOR", true).clicked() {
+                app.windows.editor = false;
+                app.plugin_editor = Some(pad);
+            }
+        } else if chip(ui, "LOAD PRESET", false).clicked() {
             app.windows.presets = true;
         }
         ui.label(

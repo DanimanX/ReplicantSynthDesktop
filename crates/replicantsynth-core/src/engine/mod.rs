@@ -2,6 +2,7 @@
 
 pub mod clip_engine;
 pub mod handles;
+pub mod plugin;
 pub mod recorder;
 
 pub use clip_engine::{
@@ -11,6 +12,10 @@ pub use clip_engine::{
 pub use handles::{
     Command, CommandType, EngineHandles, EngineShared, PadTelemetry, SampleData, SampleSlots,
     Telemetry, PADS, QUEUE_CAPACITY,
+};
+pub use plugin::{
+    bridge_pair, NoteEvent, ParamEvent, PluginBlock, PluginBridge, PluginHostCommand,
+    PLUGIN_BLOCK_FRAMES,
 };
 pub use recorder::{RecordTap, RecordingWriter};
 
@@ -71,7 +76,8 @@ pub fn sync_clip(handles: &EngineHandles, clip: &ModelClip) {
         }
     }
     handles.clear_midi_notes(clip.index);
-    if clip.kind == ClipKind::Wave {
+    // Wave and hosted-plugin pads share the piano-roll note model.
+    if matches!(clip.kind, ClipKind::Wave | ClipKind::Plugin) {
         for note in &clip.midi_notes {
             handles.set_midi_note(
                 clip.index,

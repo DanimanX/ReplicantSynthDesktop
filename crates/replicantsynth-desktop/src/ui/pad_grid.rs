@@ -34,6 +34,7 @@ pub struct GridResponse {
     pub select: Option<usize>,
     pub editor: Option<usize>,
     pub context: Option<usize>,
+    pub plugin_editor: Option<usize>,
     pub scene_launch: Option<usize>,
     pub scene_stop: Option<usize>,
 }
@@ -234,8 +235,12 @@ pub fn draw(
             }
 
             if pad_response.double_clicked() {
-                response.editor = Some(index);
                 response.select = Some(index);
+                if clip.kind == replicantsynth_core::ClipKind::Plugin {
+                    response.plugin_editor = Some(index);
+                } else {
+                    response.editor = Some(index);
+                }
             } else if pad_response.clicked() {
                 response.select = Some(index);
                 if clip.kind != replicantsynth_core::ClipKind::Empty {

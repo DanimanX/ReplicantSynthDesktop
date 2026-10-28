@@ -16,6 +16,7 @@ pub const VIOLET: Color32 = Color32::from_rgb(179, 136, 255);
 pub const GREEN: Color32 = Color32::from_rgb(118, 230, 138);
 pub const RED: Color32 = Color32::from_rgb(255, 84, 84);
 pub const WHITE: Color32 = Color32::from_rgb(236, 244, 255);
+pub const PLUGIN: Color32 = Color32::from_rgb(126, 200, 255);
 
 pub const RADIUS: u8 = 6;
 
@@ -26,6 +27,7 @@ pub fn kind_color(kind: ClipKind) -> Color32 {
         ClipKind::Wave => CYAN,
         ClipKind::Drums => PINK,
         ClipKind::Sample => VIOLET,
+        ClipKind::Plugin => PLUGIN,
     }
 }
 

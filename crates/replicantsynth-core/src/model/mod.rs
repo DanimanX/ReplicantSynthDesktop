@@ -12,9 +12,9 @@ pub mod wave_presets;
 
 pub use clip::{
     apply_kind_defaults, default_name, AcidParam, Clip, ClipKind, ClipLimits, ClipState, DrumParam,
-    FxParam, MidiNote, SampleParam, Step, WaveParam, CHORD_MODES, COLS, DISTORTION_TYPES,
-    DRUM_VOICES, DRUM_VOICE_NAMES, FILTER_MODES, MAX_MIDI_NOTES, PADS, PARAMS, QUANTIZE_OPTIONS,
-    ROWS, STEPS, WAVETABLE_BANKS,
+    FxParam, MidiNote, PluginFormat, PluginRef, SampleParam, Step, WaveParam, CHORD_MODES, COLS,
+    DISTORTION_TYPES, DRUM_VOICES, DRUM_VOICE_NAMES, FILTER_MODES, MAX_MIDI_NOTES, PADS, PARAMS,
+    QUANTIZE_OPTIONS, ROWS, STEPS, WAVETABLE_BANKS,
 };
 pub use demo::demo_project;
 pub use presets::{AcidPreset, AcidPresets, DrumPreset, DrumPresets};

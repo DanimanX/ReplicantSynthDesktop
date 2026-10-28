@@ -4,6 +4,38 @@ All notable changes to ReplicantSynth Desktop are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.2] — 2026-10-28
+
+### Added
+
+- **VST3 and CLAP hosting**: any installed plugin can take over a pad. Choose
+  **VST** in the inspector or right-click a pad, pick a plugin from a scanned
+  list, and it becomes that pad's engine.
+- **Plugin editors inside the window**: an embedded editor is a child X11 window
+  owned by the host, sized to what the plugin reports and centred in the region
+  the UI reserves. Detached windows are used where embedding is impossible
+  (Wayland, macOS, Windows) or refused by the plugin.
+- **CLAP timer and file-descriptor hosting** (`clap.timer`, `clap.posix-fd`), and
+  VST3 run-loop servicing, so VSTGUI editors actually paint.
+- **Plugin audio on its own thread**, bridged to the engine through a bounded
+  block queue: a stalling plugin costs one block of audio, never the device.
+- **Piano roll for plugin pads**: the same 16-step note model as ReplicantWave,
+  so a phrase moves between the wavetable engine and a hosted instrument.
+- **Plugin parameters as knobs** in the inspector, and **plugin state saved in
+  the project** (base64 blob per pad), restored on load.
+- **Plugin browser** with instruments/effects split, search and rescan.
+- **Manifest-only VST3 scanning** that never executes a bundle, and CLAP scanning
+  on a worker thread inside `catch_unwind`.
+
+### Fixed
+
+- The engine clamped a clip's kind to the five built-in engines, so
+  `ClipKind::Plugin` silently became a sample pad.
+- The plugin worker blocked on its reply when the audio thread had stopped
+  reading, deadlocking shutdown; the reply is now non-blocking.
+- Base64, VST3 manifest parsing and the plugin bridge protocol are covered by
+  tests, including the trailing-comma dialect VST3 writes.
+
 ## [0.0.1] — 2026-10-28
 
 First public desktop release: the Android clip launcher rebuilt as a
