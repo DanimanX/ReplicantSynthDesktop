@@ -530,7 +530,6 @@ impl ClapRuntime {
             timers: Mutex::new(Vec::new()),
             next_timer_id: AtomicU32::new(1),
             #[cfg(unix)]
-            #[cfg(unix)]
             fds: Mutex::new(Vec::new()),
         });
         let host_state = state.clone();
@@ -655,7 +654,7 @@ impl ClapRuntime {
         // SAFETY: the window outlives the plugin's GUI; it is destroyed in
         // `close_editor`, after `gui.destroy` has removed the plugin's child.
         let result =
-            unsafe { gui.set_parent(&handle, ClapWindow::from_x11_handle(window.handle())) };
+            unsafe { gui.set_parent(&handle, ClapWindow::from_x11_handle(window.handle() as _)) };
         if result.is_err() {
             drop(window);
             gui.destroy(&handle);

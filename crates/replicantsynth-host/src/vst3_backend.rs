@@ -389,7 +389,7 @@ impl Vst3Runtime {
                 rect.x,
                 rect.y,
             )?;
-            let handle = vst3_host::plugin::WindowHandle::from_x11(window.handle() as u32);
+            let handle = vst3_host::plugin::WindowHandle::from_x11(window.handle());
             let result = self
                 .plugin
                 .lock()

@@ -77,8 +77,13 @@ mod platform {
             }
         }
 
-        pub fn handle(&self) -> u64 {
-            self.window
+        /// The X11 window id.
+        ///
+        /// XIDs are 32-bit even on a 64-bit server, and `c_ulong` is 32 bits on
+        /// Windows and 64 on Unix, so returning a fixed `u32` keeps the callers
+        /// identical on every platform.
+        pub fn handle(&self) -> u32 {
+            self.window as u32
         }
 
         pub fn resize(&self, width: u32, height: u32) {
@@ -161,7 +166,7 @@ mod platform {
             Err(PluginError::EmbedUnsupported)
         }
 
-        pub fn handle(&self) -> u64 {
+        pub fn handle(&self) -> u32 {
             0
         }
 
