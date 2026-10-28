@@ -542,13 +542,31 @@ mod tests {
 
     #[test]
     fn a_real_manifest_is_parsed_when_present() {
-        for descriptor in list(Path::new("/usr/lib/vst3/Dexed.vst3")).unwrap_or_default() {
-            assert!(!descriptor.id.is_empty());
-            assert!(!descriptor.name.is_empty());
-            println!(
-                "{} {} instrument={}",
-                descriptor.name, descriptor.id, descriptor.is_instrument
-            );
+        // Read a bundle that ships a manifest, if this machine has one. A
+        // runner with no plugins must not pretend it verified the parser.
+        let mut checked = 0;
+        for dir in crate::default_scan_dirs() {
+            if !dir.to_string_lossy().to_ascii_lowercase().contains("vst3") {
+                continue;
+            }
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("vst3") {
+                    continue;
+                }
+                if !path.join("Contents/Resources/moduleinfo.json").exists() {
+                    continue;
+                }
+                for descriptor in list(&path).unwrap_or_default() {
+                    assert!(!descriptor.id.is_empty(), "{}", path.display());
+                    assert!(!descriptor.name.is_empty(), "{}", path.display());
+                    checked += 1;
+                }
+            }
         }
+        println!("parsed {checked} class(es) from real manifests");
     }
 }

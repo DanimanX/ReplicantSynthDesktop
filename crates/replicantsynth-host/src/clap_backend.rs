@@ -19,6 +19,7 @@ use clack_extensions::params::{
     HostParams, HostParamsImplMainThread, HostParamsImplShared, ParamClearFlags, ParamInfoBuffer,
     ParamInfoFlags, ParamRescanFlags, PluginParams,
 };
+#[cfg(unix)]
 use clack_extensions::posix_fd::{FdFlags, HostPosixFd, HostPosixFdImpl, PluginPosixFd};
 use clack_extensions::state::PluginState;
 use clack_extensions::timer::{HostTimer, HostTimerImpl, PluginTimer, TimerId};
@@ -114,7 +115,9 @@ struct HostState {
     timers: Mutex<Vec<RegisteredTimer>>,
     next_timer_id: AtomicU32,
     /// File descriptors the plugin wants watched (VSTGUI uses one for its
-    /// connection to the X server).
+    /// connection to the X server). Unix only: Windows has no equivalent in
+    /// CLAP, and `std::os::fd` does not exist there.
+    #[cfg(unix)]
     fds: Mutex<Vec<std::os::fd::RawFd>>,
 }
 
@@ -144,8 +147,9 @@ impl HostHandlers for ClapHost {
             .register::<HostGui>()
             .register::<HostParams>()
             .register::<HostLog>()
-            .register::<HostTimer>()
-            .register::<HostPosixFd>();
+            .register::<HostTimer>();
+        #[cfg(unix)]
+        builder.register::<HostPosixFd>();
     }
 }
 
@@ -232,6 +236,7 @@ impl HostTimerImpl for ClapHostMain<'_> {
     }
 }
 
+#[cfg(unix)]
 impl HostPosixFdImpl for ClapHostMain<'_> {
     fn register_fd(
         &self,
@@ -492,6 +497,7 @@ pub struct ClapRuntime {
     /// what it registered. A VSTGUI editor only paints when these are pumped,
     /// which is the same reason the VST3 host has to service its run loop.
     timers: Option<PluginTimer>,
+    #[cfg(unix)]
     posix_fd: Option<PluginPosixFd>,
     state: std::sync::Arc<HostState>,
 }
@@ -523,6 +529,8 @@ impl ClapRuntime {
             restart: AtomicBool::new(false),
             timers: Mutex::new(Vec::new()),
             next_timer_id: AtomicU32::new(1),
+            #[cfg(unix)]
+            #[cfg(unix)]
             fds: Mutex::new(Vec::new()),
         });
         let host_state = state.clone();
@@ -574,6 +582,7 @@ impl ClapRuntime {
             editor: None,
             editor_open: false,
             timers: None,
+            #[cfg(unix)]
             posix_fd: None,
             state,
         };
@@ -625,13 +634,23 @@ impl ClapRuntime {
         }
 
         let Some(parent) = parent else {
+            // No embeddable parent (Wayland, macOS, Windows): release the GUI we
+            // just created rather than leaking it, and let the caller fall back
+            // to a floating window.
             gui.destroy(&handle);
             return Err(PluginError::EmbedUnsupported);
         };
 
         let width = preferred.width.min(rect.width.max(160)).max(160);
         let height = preferred.height.min(rect.height.max(120)).max(120);
-        let window = EditorWindow::open(parent, "plugin editor", width, height, rect.x, rect.y)?;
+        let window =
+            match EditorWindow::open(parent, "plugin editor", width, height, rect.x, rect.y) {
+                Ok(window) => window,
+                Err(error) => {
+                    gui.destroy(&handle);
+                    return Err(error);
+                }
+            };
 
         // SAFETY: the window outlives the plugin's GUI; it is destroyed in
         // `close_editor`, after `gui.destroy` has removed the plugin's child.
@@ -714,9 +733,13 @@ impl ClapRuntime {
         if !self.editor_open {
             return;
         }
-        if self.timers.is_none() || self.posix_fd.is_none() {
+        if self.timers.is_none() {
             let handle = self.instance.plugin_handle();
             self.timers = handle.get_extension::<PluginTimer>();
+        }
+        #[cfg(unix)]
+        if self.posix_fd.is_none() {
+            let handle = self.instance.plugin_handle();
             self.posix_fd = handle.get_extension::<PluginPosixFd>();
         }
 
@@ -743,20 +766,23 @@ impl ClapRuntime {
             }
         }
 
-        let fds: Vec<std::os::fd::RawFd> = self
-            .state
-            .fds
-            .lock()
-            .map(|fds| fds.clone())
-            .unwrap_or_default();
-        if fds.is_empty() {
-            return;
-        }
-        if let Some(posix_fd) = self.posix_fd {
-            let handle = self.instance.plugin_handle();
-            for fd in fds {
-                if fd_is_readable(fd) {
-                    posix_fd.on_fd(&handle, fd, FdFlags::READ);
+        #[cfg(unix)]
+        {
+            let fds: Vec<std::os::fd::RawFd> = self
+                .state
+                .fds
+                .lock()
+                .map(|fds| fds.clone())
+                .unwrap_or_default();
+            if fds.is_empty() {
+                return;
+            }
+            if let Some(posix_fd) = self.posix_fd {
+                let handle = self.instance.plugin_handle();
+                for fd in fds {
+                    if fd_is_readable(fd) {
+                        posix_fd.on_fd(&handle, fd, FdFlags::READ);
+                    }
                 }
             }
         }
@@ -828,6 +854,7 @@ impl ClapRuntime {
 
 /// Is this descriptor readable right now? Used to drive the plugin's own
 /// event loop without ever blocking the UI thread.
+#[cfg(unix)]
 fn fd_is_readable(fd: std::os::fd::RawFd) -> bool {
     let mut poll_fd = libc_pollfd {
         fd,
@@ -839,6 +866,7 @@ fn fd_is_readable(fd: std::os::fd::RawFd) -> bool {
     ready > 0 && poll_fd.revents != 0
 }
 
+#[cfg(unix)]
 #[repr(C)]
 struct libc_pollfd {
     fd: std::os::fd::RawFd,
@@ -846,6 +874,7 @@ struct libc_pollfd {
     revents: i16,
 }
 
+#[cfg(unix)]
 extern "C" {
     fn poll(fds: *mut libc_pollfd, nfds: std::ffi::c_ulong, timeout: i32) -> i32;
 }

@@ -29,6 +29,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The CLAP `posix-fd` extension is Unix-only; importing it unguarded broke the
+  Windows build. It is now `cfg(unix)`, with the same behaviour on Linux.
+- A host test assumed a specific plugin bundle was installed, so it failed on a
+  runner without one. It now scans whatever manifests exist and asserts on those.
 - The engine clamped a clip's kind to the five built-in engines, so
   `ClipKind::Plugin` silently became a sample pad.
 - The plugin worker blocked on its reply when the audio thread had stopped

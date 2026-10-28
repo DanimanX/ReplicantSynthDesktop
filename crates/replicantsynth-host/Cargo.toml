@@ -24,12 +24,16 @@ clack-extensions = { version = "0.2", features = [
 ] }
 crossbeam-channel = "0.5"
 crossbeam-queue = "0.3"
-vst3-host = { version = "0.10", default-features = false, features = ["raw-window-handle", "egui-widgets"] }
-raw-window-handle = "0.6"
+vst3-host = { version = "0.10", default-features = false }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 x11-dl = "2.21"
+# Only the Linux build embeds editors, so only it needs vst3-host's helper and
+# the raw-window-handle bridge. Keeping them off macOS and Windows also keeps
+# that crate's own egui out of those builds.
+vst3-host = { version = "0.10", default-features = false, features = ["egui-widgets", "raw-window-handle"] }
+raw-window-handle = "0.6"
 
 [dev-dependencies]
