@@ -230,11 +230,14 @@ Windows). `cargo run --release -p replicantsynth-desktop` runs it directly.
 
 ## Verification
 
-- **Engine suite** (`cargo test --release --workspace`): 13 tests covering the
-  wavetable banks, the 303 voice, Wave polyphony, all 48 FX slots, launch
-  quantization, scenes, sample playback, 24-bit capture, transport stop,
-  the peak guard with eight simultaneous drum clips, the preset banks, JSON
-  round-trip and a full demo render.
+- **Test suite** (`cargo test --release --workspace`): 26 tests.
+  13 in the engine — wavetable banks, the 303 voice, Wave polyphony, all 48 FX
+  slots, launch quantization, scenes, sample playback, 24-bit capture, transport
+  stop, the peak guard with eight simultaneous drum clips, the preset banks, JSON
+  round-trip and a full demo render. 13 in the desktop shell — pad/note mapping,
+  the Akai SysEx envelope, pad-mode and firmware parsing, the incremental MIDI
+  parser (running status, split packets, zero-velocity note-on), the LED palette,
+  port roles, and Symphonia decoding of WAV, MP3, FLAC, OGG and M4A.
 - **Offline render**: a 42-second arrangement written through the real capture
   path, measured with `ffprobe` as `pcm_s24le`, 48 kHz stereo, peak −0.1 dBFS.
 - **Headless UI capture**: the app renders itself and writes a PNG

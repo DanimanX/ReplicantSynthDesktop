@@ -175,5 +175,17 @@ prove the UI builds a real frame.
 makes: the wavetable banks are checked for range and continuity, the 303 voice
 for life and boundedness, every FX slot for finite and bounded output, the clip
 engine for launch/stop quantization, and the recorder by reading the WAV header
-back. The desktop crate has no tests of its own; its audio and MIDI paths are
-exercised by running the app.
+back.
+
+The desktop crate tests the parts that do not need a device or a window: pad and
+note mapping, the Akai SysEx envelope, pad-mode and firmware parsing, the
+incremental MIDI parser (running status, split packets, zero-velocity note-on),
+the LED palette, port-role resolution, and Symphonia decoding of every container
+the import dialog advertises. The audio stream and the window are exercised by
+running the app, which CI does headlessly under Xvfb and captures as a PNG.
+
+Capture has two modes, and the difference is load-bearing:
+`RecordingWriter::start(.., blocking)` takes `false` from the app, where the
+audio callback must never wait and dropping frames is the only safe option, and
+`true` from the offline renderer and the tests, where the producer outruns the
+disk and a take must be complete.
