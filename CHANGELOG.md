@@ -4,6 +4,23 @@ All notable changes to ReplicantSynth Desktop are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.3] — 2026-10-28
+
+### Fixed
+
+- **Plugin editors on Wayland.** A Wayland surface cannot own an X11 child, so the
+  plugin panel used to say *“This session has no X11 window to embed into”* and
+  stop: loading a plugin left no editor at all. The host now opens a top-level
+  X11 window of its own through XWayland, titles it after the plugin, and parents
+  the editor to it — which is what makes plugins that only implement embedded
+  editors (u-he's CLAP builds, Bazille among them) show their GUI on Wayland.
+- **Detached editors stay where the desktop puts them.** The panel no longer
+  repositions a floating editor to its own coordinates, and the window carries a
+  minimum size hint plus `WM_CLASS` `("plugin-editor", "ReplicantSynth")` so a
+  window manager can size and float it.
+- **Closing a detached editor** now tears the plugin's GUI down, keeps the plugin
+  playing, and returns the UI to the grid instead of leaving a window behind.
+
 ## [0.0.2] — 2026-10-28
 
 ### Added

@@ -102,7 +102,15 @@ pub enum EditorEvent {
 /// The host-side behaviour every format backend implements.
 trait Backend {
     fn params(&self) -> &[PluginParam];
-    fn open_editor(&mut self, parent: Option<u64>, rect: EditorRect) -> Result<(), PluginError>;
+    /// Open the editor. `parent` is the application window's X11 id, or `None`
+    /// when the session has none to embed into (Wayland); `title` names the
+    /// window when it ends up detached.
+    fn open_editor(
+        &mut self,
+        parent: Option<u64>,
+        rect: EditorRect,
+        title: &str,
+    ) -> Result<(), PluginError>;
     fn close_editor(&mut self);
     fn set_editor_rect(&mut self, rect: EditorRect);
     /// Per-frame work the format needs while an editor is open (VST3's run loop).
@@ -124,8 +132,13 @@ impl Backend for clap_backend::ClapRuntime {
     fn service(&mut self) {
         self.service()
     }
-    fn open_editor(&mut self, parent: Option<u64>, rect: EditorRect) -> Result<(), PluginError> {
-        self.open_editor(parent, rect)
+    fn open_editor(
+        &mut self,
+        parent: Option<u64>,
+        rect: EditorRect,
+        title: &str,
+    ) -> Result<(), PluginError> {
+        self.open_editor(parent, rect, title)
     }
     fn close_editor(&mut self) {
         self.close_editor()
@@ -163,8 +176,13 @@ impl Backend for vst3_backend::Vst3Runtime {
     fn service(&mut self) {
         self.service()
     }
-    fn open_editor(&mut self, parent: Option<u64>, rect: EditorRect) -> Result<(), PluginError> {
-        self.open_editor(parent, rect)
+    fn open_editor(
+        &mut self,
+        parent: Option<u64>,
+        rect: EditorRect,
+        title: &str,
+    ) -> Result<(), PluginError> {
+        self.open_editor(parent, rect, title)
     }
     fn close_editor(&mut self) {
         self.close_editor()
@@ -290,7 +308,10 @@ impl HostedPlugin {
         parent: Option<u64>,
         rect: EditorRect,
     ) -> Result<(), PluginError> {
-        self.backend.open_editor(parent, rect)
+        // A detached editor is a window of its own, so it needs a name the user
+        // can pick out of their window list.
+        let title = format!("{} — ReplicantSynth", self.descriptor.name);
+        self.backend.open_editor(parent, rect, &title)
     }
 
     pub fn close_editor(&mut self) {

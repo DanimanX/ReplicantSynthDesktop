@@ -603,6 +603,7 @@ impl ClapRuntime {
         &mut self,
         parent: Option<u64>,
         rect: EditorRect,
+        title: &str,
     ) -> Result<(), PluginError> {
         if self.editor_open {
             return Ok(());
@@ -632,24 +633,34 @@ impl ClapRuntime {
             return Ok(());
         }
 
-        let Some(parent) = parent else {
-            // No embeddable parent (Wayland, macOS, Windows): release the GUI we
-            // just created rather than leaking it, and let the caller fall back
-            // to a floating window.
-            gui.destroy(&handle);
-            return Err(PluginError::EmbedUnsupported);
-        };
-
         let width = preferred.width.min(rect.width.max(160)).max(160);
         let height = preferred.height.min(rect.height.max(120)).max(120);
-        let window =
-            match EditorWindow::open(parent, "plugin editor", width, height, rect.x, rect.y) {
-                Ok(window) => window,
-                Err(error) => {
-                    gui.destroy(&handle);
-                    return Err(error);
-                }
-            };
+
+        // Where the editor draws. An X11 parent means embedding; no parent at
+        // all means the session is Wayland (or another platform that cannot
+        // host an X11 child), so the host opens a top-level window of its own.
+        // Many plugins — u-he's CLAP builds among them — only implement the
+        // embedded flavour, and this is what keeps their GUI usable on Wayland.
+        #[cfg(target_os = "linux")]
+        let opened = match parent {
+            Some(parent) => EditorWindow::open(parent, title, width, height, rect.x, rect.y),
+            None => EditorWindow::open_detached(title, preferred.width, preferred.height),
+        };
+        #[cfg(not(target_os = "linux"))]
+        let opened: Result<EditorWindow, PluginError> = {
+            let _ = parent;
+            let _ = title;
+            Err(PluginError::EmbedUnsupported)
+        };
+
+        let window = match opened {
+            Ok(window) => window,
+            Err(error) => {
+                // Release the GUI we just created rather than leaking it.
+                gui.destroy(&handle);
+                return Err(error);
+            }
+        };
 
         // SAFETY: the window outlives the plugin's GUI; it is destroyed in
         // `close_editor`, after `gui.destroy` has removed the plugin's child.
@@ -682,6 +693,9 @@ impl ClapRuntime {
     }
 
     /// Keep the plugin's editor in step with the region the host reserved.
+    ///
+    /// A detached editor lives in its own desktop window, so the region the UI
+    /// reserves for an embedded one must not drag it around or resize it.
     pub fn set_editor_rect(&mut self, rect: EditorRect) {
         if !self.editor_open {
             return;
@@ -691,6 +705,9 @@ impl ClapRuntime {
         };
         let handle = self.instance.plugin_handle();
         if let Some(window) = &self.editor {
+            if window.is_detached() {
+                return;
+            }
             window.resize(rect.width, rect.height);
             window.move_to(rect.x, rect.y);
         }
@@ -789,6 +806,17 @@ impl ClapRuntime {
 
     pub fn poll_events(&mut self) -> Vec<EditorEvent> {
         let mut out = Vec::new();
+        // A detached editor has a title bar and therefore a close button; the
+        // window manager's request has to reach the plugin before the window
+        // goes away.
+        if self
+            .editor
+            .as_ref()
+            .is_some_and(|window| window.close_requested())
+        {
+            self.close_editor();
+            out.push(EditorEvent::Closed);
+        }
         while let Ok(request) = self.requests.try_recv() {
             match request {
                 GuiRequest::Resize(width, height) => {

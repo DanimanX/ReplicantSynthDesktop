@@ -36,6 +36,8 @@ pub struct PluginManager {
     pub loaded: HashMap<usize, LoadedPlugin>,
     pub scan_error: Option<String>,
     scanned: bool,
+    /// Editors the user closed from their own window since the last frame.
+    closed_editors: Vec<usize>,
 }
 
 impl PluginManager {
@@ -185,18 +187,30 @@ impl PluginManager {
     /// Per-frame housekeeping: plugin editor requests and teardown backlogs.
     pub fn poll(&mut self, handles: &EngineHandles) {
         handles.drain_retired_bridges();
-        for loaded in self.loaded.values_mut() {
+        let mut closed = Vec::new();
+        for (pad, loaded) in self.loaded.iter_mut() {
             loaded.plugin.service();
             for event in loaded.plugin.poll_events() {
-                if matches!(event, EditorEvent::Closed) {
-                    loaded.rect = EditorRect::default();
-                }
-                if let EditorEvent::Resized(width, height) = event {
-                    loaded.rect.width = width;
-                    loaded.rect.height = height;
+                match event {
+                    EditorEvent::Closed => {
+                        // The user closed the editor's own window: the panel that
+                        // was showing it has to go away too.
+                        loaded.rect = EditorRect::default();
+                        closed.push(*pad);
+                    }
+                    EditorEvent::Resized(width, height) => {
+                        loaded.rect.width = width;
+                        loaded.rect.height = height;
+                    }
                 }
             }
         }
+        self.closed_editors.extend(closed);
+    }
+
+    /// Editors closed from their own window, once each.
+    pub fn take_closed_editors(&mut self) -> Vec<usize> {
+        std::mem::take(&mut self.closed_editors)
     }
 
     /// The size the plugin's editor is (or wants to be), in physical pixels.

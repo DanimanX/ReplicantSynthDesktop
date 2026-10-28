@@ -1396,7 +1396,11 @@ impl App {
             );
             ui.label(RichText::new(&name).size(14.0).strong().color(accent));
             if let Some(loaded) = self.plugins.get(pad) {
-                if loaded.plugin.is_floating() {
+                // A Wayland session has no X11 parent, so the editor is its own
+                // window even when the plugin only implements embedded editors.
+                // While it is closed (or failed to open) the header says nothing.
+                let detached = self.window_parent.is_none() && loaded.plugin.editor_open();
+                if loaded.plugin.is_floating() || detached {
                     ui.label(
                         RichText::new("editor is a separate window")
                             .size(9.5)
@@ -1470,10 +1474,36 @@ impl App {
         );
 
         let Some(parent) = self.window_parent else {
+            // Wayland: a `wl_surface` cannot parent an X11 child, so there is no
+            // region to embed into. The editor opens as a window of its own —
+            // hosted by us when the plugin only knows how to draw embedded —
+            // and this region becomes a placeholder that says where it went.
+            let already_open = self
+                .plugins
+                .get(pad)
+                .is_some_and(|loaded| loaded.plugin.editor_open());
+            if !already_open && !self.plugins.open_editor(pad, None, rect) {
+                let message = self
+                    .plugins
+                    .get(pad)
+                    .and_then(|loaded| loaded.error.clone())
+                    .unwrap_or_else(|| "the plugin refused to open its editor".to_string());
+                painter.text(
+                    frame_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    format!("{message}\n\nUse PIANO ROLL to edit notes instead."),
+                    egui::FontId::proportional(12.0),
+                    theme::AMBER,
+                );
+                return;
+            }
             painter.text(
                 frame_rect.center(),
                 egui::Align2::CENTER_CENTER,
-                "This session has no X11 window to embed into.\nUse OPEN EDITOR to detach it.",
+                format!(
+                    "{name} is open in its own window.\nThis Wayland session cannot \
+                     embed the editor here."
+                ),
                 egui::FontId::proportional(12.0),
                 theme::DIM,
             );
@@ -1658,6 +1688,12 @@ impl eframe::App for App {
         self.handle_midi();
         self.push_apc_feedback();
         self.plugins.poll(&self.handles);
+        for pad in self.plugins.take_closed_editors() {
+            if self.plugin_editor == Some(pad) {
+                self.plugin_editor = None;
+            }
+            self.set_status(format!("pad {:02}: plugin editor closed", pad + 1));
+        }
         if self.plugins.poll_scan() {
             let count = self.plugins.available.len();
             self.set_status(format!("{count} plugin(s) found"));

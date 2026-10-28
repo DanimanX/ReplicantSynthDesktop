@@ -114,4 +114,7 @@ keep their own projects separate. The folder holds `project.json`, `Samples/` an
   session for multi-cable access. **MIDI → CONNECT APC64** opens every port whose
   name contains `APC64`.
 - **Wayland vs X11** — eframe picks Wayland when `WAYLAND_DISPLAY` is set and
-  falls back to X11. Both are compiled in.
+  falls back to X11. Both are compiled in. On Wayland a plugin editor cannot be
+  embedded, so it opens as its own window through XWayland; unset
+  `WAYLAND_DISPLAY` to run the whole app on XWayland with editors inside the
+  window. See [PLUGINS.md](PLUGINS.md#detached-wayland).

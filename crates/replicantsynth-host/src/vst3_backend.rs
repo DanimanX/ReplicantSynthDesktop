@@ -370,7 +370,12 @@ impl Vst3Runtime {
         &self.params
     }
 
-    pub fn open_editor(&mut self, parent: Option<u64>, rect: HostRect) -> Result<(), PluginError> {
+    pub fn open_editor(
+        &mut self,
+        parent: Option<u64>,
+        rect: HostRect,
+        _title: &str,
+    ) -> Result<(), PluginError> {
         if self.editor_open {
             return Ok(());
         }
@@ -428,13 +433,19 @@ impl Vst3Runtime {
     }
 
     /// Keep the embedded editor aligned with the region the host reserved.
+    ///
+    /// A detached editor (its own top-level window) is never moved or resized to
+    /// the UI's coordinates; it only needs its run loop serviced.
     pub fn set_editor_rect(&mut self, rect: HostRect) {
         if let Some(window) = &self.editor_window {
             window.move_to(rect.x, rect.y);
             window.resize(rect.width.max(160), rect.height.max(120));
         }
         if let Ok(mut plugin) = self.plugin.try_lock() {
-            let _ = plugin.resize_editor(rect.width.max(160) as i32, rect.height.max(120) as i32);
+            if self.editor_window.is_some() {
+                let _ =
+                    plugin.resize_editor(rect.width.max(160) as i32, rect.height.max(120) as i32);
+            }
             plugin.service_run_loop();
         }
     }

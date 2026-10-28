@@ -189,7 +189,9 @@ touches its own buffers, and the worst case is one underrun of 128 frames.
 ### Editors
 
 The UI reserves a rectangle, converts it to physical pixels, and the backend
-creates a child X11 window there. For CLAP the child is handed to `gui.set_parent`
+creates a child X11 window there. When there is no window to embed into — a
+Wayland session — the same code creates a top-level X11 window instead and
+parenting continues unchanged; see [PLUGINS.md](PLUGINS.md#detached-wayland). For CLAP the child is handed to `gui.set_parent`
 after the plugin's own GUI is created; for VST3 `Plugin::open_editor` receives the
 window id and creates its view inside it. Frames the host must pump:
 

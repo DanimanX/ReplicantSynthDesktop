@@ -88,11 +88,30 @@ the host's job:
 The editor is sized to what the plugin reports and centred in the region the UI
 reserves. A fixed-size editor keeps its size; the frame follows it.
 
-### Detached
+### Detached (Wayland)
 
-When embedding is impossible the plugin creates a top-level window of its own.
-That covers Wayland (a `wl_surface` cannot parent another window), macOS and
-Windows in 0.0.2, and any plugin that refuses `set_parent`.
+A Wayland surface cannot own an X11 child, so a Wayland session has no rectangle
+to embed into. The host then opens a top-level X11 window of its own — through
+XWayland — titles it after the plugin, and parents the plugin's editor to it
+exactly as it would inside the application window. The plugin never learns the
+difference, which is what keeps plugins that only implement the embedded flavour
+usable: u-he's CLAP builds (Bazille, Diva, …) report
+`is_api_supported(x11, floating = true)` as *false* and nothing else.
+
+The window belongs to the desktop: it can be moved, covered and closed like any
+other. Closing it from its title bar tears the editor down (the plugin keeps
+playing) and the UI returns to the grid, so **OPEN EDITOR** brings it back. The
+window carries `WM_CLASS` `("plugin-editor", "ReplicantSynth")` and a minimum
+size hint equal to the editor's own size. A stacking window manager honours
+that; a tiling compositor still picks the tile, so float the window to see the
+whole editor (Hyprland: `SUPER+V`, or
+`windowrulev2 = float, class:^(ReplicantSynth)$` in `hyprland.conf`).
+
+With no XWayland running there is no X display for the plugin to draw on, and
+the panel says so instead of opening nothing.
+
+macOS and Windows open detached editors where the format offers one; embedding
+there is not wired yet.
 
 ## Parameters
 

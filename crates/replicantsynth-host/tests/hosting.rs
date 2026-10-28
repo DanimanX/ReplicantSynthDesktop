@@ -195,3 +195,32 @@ fn listing_a_bundle_never_loads_it() {
     // Scans may skip them, but nothing here may have executed a plugin.
     assert!(with_manifest > 0 || without_manifest == 0);
 }
+
+/// A Wayland session has no X11 window to embed into. The host must still give
+/// the plugin somewhere to draw: a top-level X11 window of its own, created the
+/// same way it creates an embedded child.
+#[test]
+fn a_clap_editor_opens_without_a_parent_window() {
+    let Some(descriptor) = find(PluginFormat::Clap, true) else {
+        println!("no CLAP instrument installed; skipping");
+        return;
+    };
+    if std::env::var_os("DISPLAY").is_none() {
+        println!("no X display; skipping");
+        return;
+    }
+    let (mut plugin, _bridge) =
+        HostedPlugin::load(&descriptor, 48_000.0, 256, true).expect("the plugin loads");
+    let rect = replicantsynth_host::EditorRect {
+        x: 0,
+        y: 0,
+        width: 800,
+        height: 600,
+    };
+    plugin
+        .open_editor(None, rect)
+        .expect("an editor opens with no parent window");
+    assert!(plugin.editor_open(), "the editor reports itself open");
+    plugin.close_editor();
+    assert!(!plugin.editor_open(), "the editor is closed again");
+}

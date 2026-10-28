@@ -105,9 +105,11 @@ on Windows.
 **Editors.** An embedded editor becomes a child of the application window, so it
 is clipped and moved with the region the UI reserves for it. CLAP editors need
 the host to drive their timers and file descriptors; VST3's VSTGUI editors need
-the host to service the run loop — both are pumped every frame. On Wayland, where
-a surface cannot parent another window, the plugin opens a detached editor
-window instead. Plugins that refuse to embed also fall back to their own window.
+the host to service the run loop — both are pumped every frame. On Wayland,
+where a surface cannot parent another window, the host opens its own top-level
+X11 window (through XWayland) and the editor lives there, so even plugins that
+only implement embedded editors keep their GUI. Plugins that refuse to embed also
+fall back to their own window.
 
 **Audio path.** The plugin runs on its own worker thread, never on the audio
 callback. The engine hands it fixed 128-frame blocks through a bounded queue and
@@ -355,9 +357,10 @@ crates/replicantsynth-desktop/       the application
 - **One plugin per pad**, and it must be an instrument or an insert-style effect:
   there is no side-chain or multi-output routing, and the plugin replaces the
   pad's engine rather than sitting beside it.
-- **Plugin editors embed on X11 only.** On Wayland the plugin draws its own
-  window; on macOS and Windows embedding is not wired yet, so editors open
-  detached there too.
+- **Plugin editors embed on X11 only.** On Wayland the editor opens as its own
+  window (hosted by us when the plugin only knows how to draw embedded), so it
+  cannot be clipped to the panel; on macOS and Windows embedding is not wired
+  yet, so editors open detached there too.
 - **Scans do not execute VST3 bundles.** A bundle without a `moduleinfo.json` is
   skipped, because loading one to ask its name is how a scanner ends up starting
   Wine for a yabridge plugin. Point at such a plugin through
