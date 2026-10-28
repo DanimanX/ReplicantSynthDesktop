@@ -2856,7 +2856,7 @@ checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 
 [[package]]
 name = "replicantsynth-core"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "arc-swap",
  "crossbeam-channel",
@@ -2867,7 +2867,7 @@ dependencies = [
 
 [[package]]
 name = "replicantsynth-desktop"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "cpal",
  "eframe",
@@ -2884,7 +2884,7 @@ dependencies = [
 
 [[package]]
 name = "replicantsynth-host"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "clack-extensions",
  "clack-host",

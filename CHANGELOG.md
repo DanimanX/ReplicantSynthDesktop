@@ -4,6 +4,19 @@ All notable changes to ReplicantSynth Desktop are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.4] — 2026-10-28
+
+### Fixed
+
+- **Parameters changed in a plugin's own editor now reach the inspector.** Turning
+  a knob in Bazille (or any hosted instrument) used to move the sound and nothing
+  else: the parameter list the SOUND tab draws was the one read when the plugin
+  was loaded, so the knobs in *PARAMETERS* stayed where they were. The host now
+  pulls the plugin's values back every frame — VST3 reports the edits its editor
+  makes through `IComponentHandler::performEdit`, CLAP has no such notification so
+  the values are read back at ~20 Hz — and the panel follows the drag, asking for
+  a repaint while it moves.
+
 ## [0.0.3] — 2026-10-28
 
 ### Fixed

@@ -185,11 +185,20 @@ impl PluginManager {
     }
 
     /// Per-frame housekeeping: plugin editor requests and teardown backlogs.
-    pub fn poll(&mut self, handles: &EngineHandles) {
+    ///
+    /// Returns true when a parameter moved inside a plugin's own editor, so the
+    /// caller can ask for a repaint: the editor is a window of the plugin, not of
+    /// this UI, so dragging a knob there produces no input event here and the
+    /// frame would otherwise wait for the idle refresh.
+    pub fn poll(&mut self, handles: &EngineHandles) -> bool {
         handles.drain_retired_bridges();
+        let mut moved = false;
         let mut closed = Vec::new();
         for (pad, loaded) in self.loaded.iter_mut() {
             loaded.plugin.service();
+            if loaded.plugin.sync_params() && loaded.plugin.editor_open() {
+                moved = true;
+            }
             for event in loaded.plugin.poll_events() {
                 match event {
                     EditorEvent::Closed => {
@@ -206,6 +215,7 @@ impl PluginManager {
             }
         }
         self.closed_editors.extend(closed);
+        moved
     }
 
     /// Editors closed from their own window, once each.

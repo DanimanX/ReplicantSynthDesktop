@@ -526,20 +526,30 @@ impl Vst3Runtime {
             .map_err(|error| PluginError::State(error.to_string()))
     }
 
-    pub fn param_value(&mut self, id: u32) -> Option<f64> {
-        let plugin = self.plugin.lock().ok()?;
-        plugin
-            .get_parameters()
-            .ok()?
-            .into_iter()
-            .find(|parameter| parameter.id == id)
-            .map(|parameter| parameter.value)
+    /// Parameter edits the plugin's own editor reported since the last call,
+    /// as `(id, normalized value)`.
+    ///
+    /// `vst3-host` records them through the component handler the plugin calls
+    /// from its GUI (`performEdit`) and, during `process()`, routes the same
+    /// values into the processor's input queue — so the DSP and this list stay
+    /// in sync. This host keeps every `PluginParam`'s own range at 0..1, which
+    /// makes the normalized value the native value.
+    ///
+    /// `try_lock`, not `lock`: the audio thread owns the plugin most of the
+    /// time, and a poll that lands mid-block must not stall a UI frame. A missed
+    /// poll is not a lost edit — the stash is drained by the next one.
+    pub fn poll_param_changes(&mut self) -> Vec<(u32, f64)> {
+        match self.plugin.try_lock() {
+            Ok(plugin) => plugin.get_parameter_changes(),
+            Err(_) => Vec::new(),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use replicantsynth_core::engine::PluginBlock;
 
     #[test]
     fn trailing_commas_are_tolerated() {
@@ -579,5 +589,67 @@ mod tests {
             }
         }
         println!("parsed {checked} class(es) from real manifests");
+    }
+
+    /// The first installed VST3 instrument on this machine, if there is one.
+    fn an_installed_instrument() -> Option<(std::path::PathBuf, String)> {
+        crate::scan(&crate::default_scan_dirs())
+            .into_iter()
+            .find(|descriptor| descriptor.format == PluginFormat::Vst3 && descriptor.is_instrument)
+            .map(|descriptor| (descriptor.path, descriptor.id))
+    }
+
+    fn render(processor: &mut dyn PluginProcessor, blocks: usize) {
+        for _ in 0..blocks {
+            let mut block = PluginBlock {
+                frames: 128,
+                ..PluginBlock::default()
+            };
+            processor.process(&mut block);
+        }
+    }
+
+    #[test]
+    fn a_value_the_host_writes_reaches_the_plugin_and_does_not_echo_back() {
+        let _serial = crate::test_support::one_plugin_at_a_time();
+        let Some((path, id)) = an_installed_instrument() else {
+            println!("no VST3 instrument installed; skipping");
+            return;
+        };
+        let (mut runtime, mut processor) = Vst3Runtime::load(&path, &id, 48_000.0, 256, true)
+            .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+
+        let Some(param) = runtime.params.iter().find(|param| !param.stepped).cloned() else {
+            println!("{} exposes no editable parameter; skipping", path.display());
+            return;
+        };
+        let target = if param.value > 0.5 { 0.0 } else { 1.0 };
+
+        processor.set_param(param.id, target as f32);
+        render(processor.as_mut(), 4);
+
+        // The write landed in the plugin's own controller, so its editor and its
+        // saved state agree with the knob the user turned here.
+        let current = runtime
+            .plugin
+            .lock()
+            .expect("plugin lock")
+            .get_parameters()
+            .expect("parameters")
+            .into_iter()
+            .find(|parameter| parameter.id == param.id)
+            .map(|parameter| parameter.value)
+            .expect("parameter");
+        assert!(
+            (current - target).abs() < 1e-3,
+            "plugin holds {current}, expected {target}"
+        );
+
+        // ...and it is not reported as an edit, which would otherwise drag the
+        // inspector's knob back to a stale value.
+        assert!(
+            runtime.poll_param_changes().is_empty(),
+            "a value the host itself wrote must not come back as a plugin edit"
+        );
     }
 }

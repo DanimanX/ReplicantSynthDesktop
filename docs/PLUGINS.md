@@ -120,6 +120,13 @@ Values are normalized 0..1 in both formats. Changes travel to the worker on a
 lock-free queue and are applied as CLAP parameter events, or `setParameter` calls
 for VST3, before the next block.
 
+Edits also travel the other way. A value the user moves inside the plugin's own
+editor is pulled back into the knob row: VST3 plugins report those edits through
+`IComponentHandler::performEdit`, which the host drains every frame; CLAP has no
+such notification, so a CLAP plugin's values are read back at about 20 Hz while
+it is loaded. Either way the panel follows the plugin instead of showing the
+values it had at load time.
+
 A plugin with thousands of parameters (Dexed reports 2238) is meant to be edited
 in its own editor; the knob row is for quick access to the first few.
 

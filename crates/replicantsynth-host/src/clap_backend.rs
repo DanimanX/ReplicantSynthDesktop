@@ -491,6 +491,11 @@ pub struct ClapRuntime {
     configuration: Option<GuiConfiguration<'static>>,
     requests: Receiver<GuiRequest>,
     params: Vec<PluginParam>,
+    /// When the parameter values were last read back from the plugin. CLAP has
+    /// no host notification for a value the plugin's own editor changes, so the
+    /// values have to be polled — and the poll is throttled, because a large
+    /// instrument exposes thousands of parameters.
+    last_param_poll: Option<Instant>,
     editor: Option<EditorWindow>,
     editor_open: bool,
     /// The plugin's timer and fd extensions, plus the host state that tracks
@@ -578,6 +583,7 @@ impl ClapRuntime {
             configuration,
             requests: requests_rx,
             params,
+            last_param_poll: None,
             editor: None,
             editor_open: false,
             timers: None,
@@ -870,12 +876,49 @@ impl ClapRuntime {
             .map_err(|error| PluginError::State(error.to_string()))
     }
 
-    pub fn param_value(&mut self, id: u32) -> Option<f64> {
-        let params = self
-            .instance
-            .access_handler(|handler| handler.params.get())?;
+    /// Read back every parameter value and report the ones that moved, in each
+    /// parameter's own range.
+    ///
+    /// CLAP has no equivalent of VST3's `performEdit`: a plugin whose own editor
+    /// changes a value has no way to tell the host, so `clap_plugin_params`
+    /// `get_value` is the only source of truth. Reading all of them every frame
+    /// is wasteful for an instrument with thousands of parameters, so the poll
+    /// runs at ~20 Hz — fast enough that a dragged knob visibly follows on the
+    /// next repaint, cheap enough to leave the UI thread alone.
+    pub fn poll_param_changes(&mut self) -> Vec<(u32, f64)> {
+        const INTERVAL: Duration = Duration::from_millis(50);
+        let now = Instant::now();
+        if let Some(last) = self.last_param_poll {
+            if now.duration_since(last) < INTERVAL {
+                return Vec::new();
+            }
+        }
+        self.last_param_poll = Some(now);
+
+        let Some(params) = self.instance.access_handler(|handler| handler.params.get()) else {
+            return Vec::new();
+        };
         let handle = self.instance.plugin_handle();
-        params.get_value(&handle, ClapId::new(id))
+        let mut changes = Vec::new();
+        for param in self.params.iter_mut() {
+            let Some(value) = params.get_value(&handle, ClapId::new(param.id)) else {
+                continue;
+            };
+            let value = if param.min <= param.max {
+                value.clamp(param.min, param.max)
+            } else {
+                value
+            };
+            // A stepped parameter stops on the same value for every scale click,
+            // so a value that is merely re-read must not count as a change.
+            let span = (param.max - param.min).abs();
+            if (param.value - value).abs() <= (span * 1e-6).max(1e-9) {
+                continue;
+            }
+            param.value = value;
+            changes.push((param.id, value));
+        }
+        changes
     }
 }
 
@@ -1003,4 +1046,111 @@ fn inspect(
     }
 
     Ok((params, layout, note_port))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use replicantsynth_core::engine::PluginBlock;
+
+    /// The first installed CLAP instrument on this machine, if there is one.
+    ///
+    /// These tests are evidence on a workstation with plugins and a no-op on a
+    /// CI runner without them — the same rule the rest of the host tests follow.
+    fn an_installed_instrument() -> Option<(std::path::PathBuf, String)> {
+        let descriptors = crate::scan(&crate::default_scan_dirs());
+        descriptors
+            .into_iter()
+            .find(|descriptor| descriptor.format == PluginFormat::Clap && descriptor.is_instrument)
+            .map(|descriptor| (descriptor.path, descriptor.id))
+    }
+
+    /// Load an instrument and render `blocks` silent blocks, so anything the
+    /// plugin does inside `process()` has happened.
+    fn run(
+        runtime: &mut ClapRuntime,
+        processor: &mut dyn PluginProcessor,
+        blocks: usize,
+    ) -> Option<(u32, f64, f64)> {
+        let param = runtime
+            .params
+            .iter_mut()
+            .find(|param| !param.stepped && param.max - param.min > 1e-6)?;
+        let before = param.value;
+        let target = if before > (param.min + param.max) / 2.0 {
+            param.min
+        } else {
+            param.max
+        };
+        processor.set_param(param.id, target as f32);
+        for _ in 0..blocks {
+            let mut block = PluginBlock {
+                frames: 128,
+                ..PluginBlock::default()
+            };
+            processor.process(&mut block);
+        }
+        Some((param.id, before, target))
+    }
+
+    #[test]
+    fn a_value_changed_inside_the_plugin_is_read_back() {
+        let _serial = crate::test_support::one_plugin_at_a_time();
+        let Some((path, id)) = an_installed_instrument() else {
+            println!("no CLAP instrument installed; skipping");
+            return;
+        };
+        let (mut runtime, mut processor) =
+            ClapRuntime::load(&path, &id, 48_000.0, 256, true).expect("load");
+
+        // CLAP has no change notification, so this is the read-back the
+        // inspector depends on: the value moved inside the plugin, and polling
+        // is the only way the host learns about it.
+        runtime.last_param_poll = None;
+        let Some((param_id, before, target)) = run(&mut runtime, processor.as_mut(), 4) else {
+            println!("{} exposes no editable parameter; skipping", path.display());
+            return;
+        };
+
+        let changes = runtime.poll_param_changes();
+        let reported = changes
+            .iter()
+            .find(|(changed, _)| *changed == param_id)
+            .map(|(_, value)| *value)
+            .expect("the changed parameter is reported");
+        assert!(
+            (reported - target).abs() < 1e-3,
+            "{before} -> {reported}, expected {target}"
+        );
+        let cached = runtime
+            .params
+            .iter()
+            .find(|param| param.id == param_id)
+            .expect("parameter");
+        assert!((cached.value - target).abs() < 1e-3);
+    }
+
+    #[test]
+    fn polling_again_reports_nothing_and_the_throttle_holds() {
+        let _serial = crate::test_support::one_plugin_at_a_time();
+        let Some((path, id)) = an_installed_instrument() else {
+            println!("no CLAP instrument installed; skipping");
+            return;
+        };
+        let (mut runtime, mut processor) =
+            ClapRuntime::load(&path, &id, 48_000.0, 256, true).expect("load");
+        runtime.last_param_poll = None;
+        if run(&mut runtime, processor.as_mut(), 4).is_none() {
+            println!("{} exposes no editable parameter; skipping", path.display());
+            return;
+        }
+        assert!(
+            !runtime.poll_param_changes().is_empty(),
+            "the first poll reports the change"
+        );
+        assert!(
+            runtime.poll_param_changes().is_empty(),
+            "values that did not move are not changes, and the poll is throttled"
+        );
+    }
 }

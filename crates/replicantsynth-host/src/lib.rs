@@ -122,7 +122,12 @@ trait Backend {
     fn poll_events(&mut self) -> Vec<EditorEvent>;
     fn save_state(&mut self) -> Result<Vec<u8>, PluginError>;
     fn restore_state(&mut self, data: &[u8]) -> Result<(), PluginError>;
-    fn param_value(&mut self, id: u32) -> Option<f64>;
+    /// `(id, value)` pairs the plugin changed from its own editor since the last
+    /// call, in each parameter's own range. Formats that notify the host return
+    /// only what moved; a format that does not poll instead.
+    fn poll_param_changes(&mut self) -> Vec<(u32, f64)> {
+        Vec::new()
+    }
 }
 
 impl Backend for clap_backend::ClapRuntime {
@@ -164,8 +169,8 @@ impl Backend for clap_backend::ClapRuntime {
     fn restore_state(&mut self, data: &[u8]) -> Result<(), PluginError> {
         self.restore_state(data)
     }
-    fn param_value(&mut self, id: u32) -> Option<f64> {
-        self.param_value(id)
+    fn poll_param_changes(&mut self) -> Vec<(u32, f64)> {
+        self.poll_param_changes()
     }
 }
 
@@ -208,8 +213,8 @@ impl Backend for vst3_backend::Vst3Runtime {
     fn restore_state(&mut self, data: &[u8]) -> Result<(), PluginError> {
         self.restore_state(data)
     }
-    fn param_value(&mut self, id: u32) -> Option<f64> {
-        self.param_value(id)
+    fn poll_param_changes(&mut self) -> Vec<(u32, f64)> {
+        self.poll_param_changes()
     }
 }
 
@@ -219,8 +224,6 @@ pub struct HostedPlugin {
     backend: Box<dyn Backend>,
     worker: PluginWorker,
     params: Vec<PluginParam>,
-    /// Latest value each parameter was set to, for the UI's own display.
-    pending: Vec<(u32, f32)>,
 }
 
 impl HostedPlugin {
@@ -271,7 +274,6 @@ impl HostedPlugin {
                 backend,
                 worker,
                 params,
-                pending: Vec::new(),
             },
             bridge,
         ))
@@ -290,17 +292,22 @@ impl HostedPlugin {
         if let Some(param) = self.params.iter_mut().find(|param| param.id == id) {
             param.value = value;
         }
-        self.pending.push((id, normalized as f32));
         self.worker.set_param(id, normalized as f32);
     }
 
-    /// Ask the plugin for its current value of one parameter.
-    pub fn refresh_param(&mut self, id: u32) -> Option<f64> {
-        let value = self.backend.param_value(id)?;
-        if let Some(param) = self.params.iter_mut().find(|param| param.id == id) {
-            param.value = value;
-        }
-        Some(value)
+    /// Mirror parameter values the plugin changed from its own editor into the
+    /// cached list the UI displays.
+    ///
+    /// Turning a knob in the plugin's own window is the plugin telling the host
+    /// that a parameter moved. Nothing else in this application reads the
+    /// parameter list between frames, so without this poll the inspector kept
+    /// showing the values that were current when the plugin was loaded.
+    ///
+    /// Returns true when a value actually moved, so the caller can ask for a
+    /// fresh frame instead of repainting on a plugin that reported nothing.
+    pub fn sync_params(&mut self) -> bool {
+        let changes = self.backend.poll_param_changes();
+        apply_param_values(&mut self.params, &changes)
     }
 
     pub fn open_editor(
@@ -385,8 +392,222 @@ impl fmt::Debug for HostedPlugin {
     }
 }
 
+/// Fold `(id, value)` pairs the plugin reported into the cached parameter list.
+///
+/// Values arrive in each parameter's own range, ids the list does not know are
+/// ignored, and a value that did not really move is not a change — a format
+/// without change notification (CLAP) hands back every value it has, and a float
+/// re-read unchanged must not turn into a repaint on every frame.
+///
+/// Returns true when at least one cached value moved.
+fn apply_param_values(params: &mut [PluginParam], changes: &[(u32, f64)]) -> bool {
+    if changes.is_empty() {
+        return false;
+    }
+    // A big instrument has thousands of parameters and CLAP reports all of them,
+    // so scan for the small batches (VST3 sends only what was edited) and index
+    // once when the batch stops being small enough for a scan per change.
+    let index: Option<std::collections::HashMap<u32, usize>> = if changes.len() > 8 {
+        Some(
+            params
+                .iter()
+                .enumerate()
+                .map(|(position, param)| (param.id, position))
+                .collect(),
+        )
+    } else {
+        None
+    };
+
+    let mut moved = false;
+    for &(id, value) in changes {
+        let position = match &index {
+            Some(index) => index.get(&id).copied(),
+            None => params.iter().position(|param| param.id == id),
+        };
+        let Some(position) = position else {
+            continue;
+        };
+        let param = &mut params[position];
+        let span = (param.max - param.min).abs();
+        if (param.value - value).abs() <= (span * 1e-6).max(1e-9) {
+            continue;
+        }
+        param.value = value;
+        moved = true;
+    }
+    moved
+}
+
 fn next_id() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(1);
     NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Test-only coordination for the tests that instantiate real plugins.
+///
+/// Instrument plugins are heavy global state: two instances created from two
+/// test threads at once can corrupt each other's heap (u-he aborts with
+/// `malloc(): invalid size`). Every test that loads a plugin takes this lock for
+/// its whole body, so the suite stays parallel for everything else.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+
+    pub fn one_plugin_at_a_time() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn param(id: u32, value: f64) -> PluginParam {
+        PluginParam {
+            id,
+            name: format!("param {id}"),
+            group: String::new(),
+            min: 0.0,
+            max: 1.0,
+            default: 0.5,
+            stepped: false,
+            value,
+        }
+    }
+
+    /// A backend whose parameter reports the test scripts, and a processor that
+    /// renders nothing: together they stand in for a plugin's own editor moving
+    /// a knob, without needing a plugin or a display.
+    struct ScriptedBackend {
+        params: Vec<PluginParam>,
+        reports: std::collections::VecDeque<Vec<(u32, f64)>>,
+    }
+
+    impl Backend for ScriptedBackend {
+        fn params(&self) -> &[PluginParam] {
+            &self.params
+        }
+        fn open_editor(
+            &mut self,
+            _parent: Option<u64>,
+            _rect: EditorRect,
+            _title: &str,
+        ) -> Result<(), PluginError> {
+            Ok(())
+        }
+        fn close_editor(&mut self) {}
+        fn set_editor_rect(&mut self, _rect: EditorRect) {}
+        fn preferred_size(&mut self) -> Option<(u32, u32)> {
+            None
+        }
+        fn editor_open(&self) -> bool {
+            true
+        }
+        fn is_floating(&self) -> bool {
+            false
+        }
+        fn poll_events(&mut self) -> Vec<EditorEvent> {
+            Vec::new()
+        }
+        fn save_state(&mut self) -> Result<Vec<u8>, PluginError> {
+            Ok(Vec::new())
+        }
+        fn restore_state(&mut self, _data: &[u8]) -> Result<(), PluginError> {
+            Ok(())
+        }
+        fn poll_param_changes(&mut self) -> Vec<(u32, f64)> {
+            self.reports.pop_front().unwrap_or_default()
+        }
+    }
+
+    struct SilentProcessor;
+
+    impl crate::worker::PluginProcessor for SilentProcessor {
+        fn process(&mut self, _block: &mut replicantsynth_core::engine::PluginBlock) {}
+        fn set_param(&mut self, _id: u32, _value: f32) {}
+    }
+
+    /// A `HostedPlugin` whose plugin is the script above.
+    fn scripted(reports: Vec<Vec<(u32, f64)>>) -> HostedPlugin {
+        let params = vec![param(1, 0.0), param(2, 0.5)];
+        let (bridge, blocks_in, blocks_out) = bridge_pair(next_id());
+        drop(bridge);
+        HostedPlugin {
+            descriptor: PluginDescriptor {
+                format: replicantsynth_core::model::PluginFormat::Clap,
+                path: std::path::PathBuf::from("/dev/null"),
+                id: "test".to_string(),
+                name: "scripted".to_string(),
+                vendor: String::new(),
+                category: "Instrument".to_string(),
+                is_instrument: true,
+            },
+            backend: Box::new(ScriptedBackend {
+                params: params.clone(),
+                reports: reports.into(),
+            }),
+            worker: crate::worker::PluginWorker::spawn(
+                Box::new(SilentProcessor),
+                blocks_in,
+                blocks_out,
+            ),
+            params,
+        }
+    }
+
+    #[test]
+    fn a_knob_turned_in_the_plugins_own_editor_reaches_the_ui_list() {
+        // What `params()` returns is what the inspector draws, so a value the
+        // plugin reported has to appear there or the tab never moves.
+        let mut plugin = scripted(vec![vec![(2, 0.9)]]);
+        assert!(plugin.sync_params());
+        assert_eq!(plugin.params()[1].value, 0.9);
+        assert_eq!(plugin.params()[0].value, 0.0);
+    }
+
+    #[test]
+    fn a_quiet_frame_reports_no_change() {
+        let mut plugin = scripted(vec![Vec::new()]);
+        assert!(!plugin.sync_params());
+    }
+
+    #[test]
+    fn a_change_the_plugin_reported_reaches_the_cached_list() {
+        let mut params = vec![param(1, 0.25), param(2, 0.5)];
+        assert!(apply_param_values(&mut params, &[(2, 0.75)]));
+        assert_eq!(params[0].value, 0.25);
+        assert_eq!(params[1].value, 0.75);
+    }
+
+    #[test]
+    fn a_value_re_read_unchanged_is_not_a_change() {
+        let mut params = vec![param(1, 0.25)];
+        assert!(!apply_param_values(&mut params, &[(1, 0.25)]));
+        // Re-reading across a float round-trip must not count either.
+        assert!(!apply_param_values(&mut params, &[(1, 0.25 + 1e-12)]));
+    }
+
+    #[test]
+    fn ids_the_list_does_not_know_are_ignored() {
+        let mut params = vec![param(1, 0.25)];
+        assert!(!apply_param_values(&mut params, &[(99, 1.0)]));
+        assert_eq!(params[0].value, 0.25);
+    }
+
+    #[test]
+    fn a_big_batch_still_lands_on_the_right_parameter() {
+        // Past the scan threshold the fold indexes by id instead of scanning, so
+        // this pins the indexed path: 2000 parameters, every value moved.
+        let mut params: Vec<PluginParam> = (0..2000).map(|id| param(id * 3 + 7, 0.0)).collect();
+        let changes: Vec<(u32, f64)> = params.iter().map(|param| (param.id, 0.5)).collect();
+        assert!(apply_param_values(&mut params, &changes));
+        assert!(params.iter().all(|param| param.value == 0.5));
+        // Twice in a row is a no-op: the display settles instead of repainting.
+        assert!(!apply_param_values(&mut params, &changes));
+    }
 }

@@ -1687,7 +1687,12 @@ impl eframe::App for App {
         self.audio.poll_error();
         self.handle_midi();
         self.push_apc_feedback();
-        self.plugins.poll(&self.handles);
+        if self.plugins.poll(&self.handles) {
+            // A knob is being dragged in a plugin's own editor: keep the
+            // inspector's copy of the parameters in step with the drag instead
+            // of waiting for the next idle repaint.
+            ctx.request_repaint();
+        }
         for pad in self.plugins.take_closed_editors() {
             if self.plugin_editor == Some(pad) {
                 self.plugin_editor = None;
