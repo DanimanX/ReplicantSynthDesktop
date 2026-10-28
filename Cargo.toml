@@ -1,0 +1,26 @@
+[workspace]
+members = ["crates/replicantsynth-core", "crates/replicantsynth-desktop"]
+resolver = "2"
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+authors = ["Daniel Rojas <daniel.rojas@chileatiende.cl>"]
+repository = "https://github.com/DanimanX/ReplicantSynthDesktop"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+crossbeam-queue = "0.3"
+arc-swap = "1.7"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
+[profile.dev]
+opt-level = 1

@@ -1,0 +1,40 @@
+ReplicantSynth Desktop
+Copyright (c) 2026 Daniel Rojas Grasset (DanimanX)
+
+This application unites four MIT-licensed Replicant instruments:
+
+  Replicant303  — Virtual analog TB-303 synthesizer and pattern sequencer
+                  https://github.com/DanimanX/Replicant303
+  ReplicantWave — Cyberpunk wavetable synthesizer
+                  https://github.com/DanimanX/ReplicantWave
+  Replicant909  — Circuit-level TR-909 drum machine
+                  https://github.com/DanimanX/Replicant909
+  ReplicantFX   — SP-404MKII 48-slot MFX processor
+                  https://github.com/DanimanX/ReplicantFX
+
+The desktop engine is a Rust port of the shared C++20 clip engine written for
+ReplicantSynthAndroid (MIT, same author): the Replicant303 voice, the
+Replicant909 voice models, the ReplicantWave wavetable architecture and the
+ReplicantFX effect algorithms. The 48-slot MFX names, LED codes, parameter
+labels and factory defaults come from the SP-404MKII v5.52 firmware table used
+by the MIT-licensed ReplicantFX plug-in.
+
+Third-party Rust crates:
+
+  egui / eframe        MIT OR Apache-2.0
+  cpal                 Apache-2.0
+  midir                MIT
+  symphonia            MPL-2.0
+  rfd                  MIT
+  serde / serde_json   MIT OR Apache-2.0
+  crossbeam-queue      MIT OR Apache-2.0
+  arc-swap             MIT OR Apache-2.0
+  image                MIT OR Apache-2.0
+
+The 909 PCM ROM content is generated procedurally from the voice model in the
+MIT-licensed Replicant909 source; no Roland firmware or copyrighted samples are
+included.
+
+The bundled demo sample (assets/demo/neon_stab.wav) is the same 3-second vocal
+stab shipped with ReplicantSynthAndroid and is generated from the same
+MIT-licensed sources.

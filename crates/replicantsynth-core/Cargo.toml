@@ -1,0 +1,21 @@
+[package]
+name = "replicantsynth-core"
+description = "ReplicantSynth engine: 303, Wave, 909, ReplicantFX and the 64-pad clip launcher"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+crossbeam-queue.workspace = true
+arc-swap.workspace = true
+
+[[bin]]
+name = "render-demo"
+path = "src/bin/render_demo.rs"
+
+[dev-dependencies]

@@ -1,0 +1,275 @@
+name: desktop
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ '0.*' ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  lint:
+    name: Format and clippy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libasound2-dev libxkbcommon-dev \
+            libwayland-dev libx11-dev libxcb1-dev libudev-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: Engine tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-24.04, macos-14, windows-2022 ]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libasound2-dev libxkbcommon-dev \
+            libwayland-dev libx11-dev libxcb1-dev libudev-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+
+      - name: cargo test
+        run: cargo test --release --workspace
+
+      - name: Offline demo render
+        shell: bash
+        run: |
+          cargo run --release -p replicantsynth-core --bin render-demo -- \
+            --out build/replicantsynth_demo.wav \
+            --seconds 12 \
+            --sample assets/demo/neon_stab.wav
+
+      - name: Verify the render
+        shell: bash
+        run: |
+          ls -l build/replicantsynth_demo.wav
+          PYTHON="$(command -v python3 || command -v python)"
+          "$PYTHON" - <<'PY'
+          import struct, sys
+          with open('build/replicantsynth_demo.wav', 'rb') as handle:
+              data = handle.read()
+          assert data[0:4] == b'RIFF', 'missing RIFF header'
+          assert data[8:12] == b'WAVE', 'missing WAVE header'
+          bits = struct.unpack('<H', data[34:36])[0]
+          rate = struct.unpack('<I', data[24:28])[0]
+          size = struct.unpack('<I', data[40:44])[0]
+          assert bits == 24, f'expected 24-bit PCM, got {bits}'
+          assert rate == 48000, f'expected 48 kHz, got {rate}'
+          assert size + 44 == len(data), 'data chunk size mismatch'
+          print(f'capture ok: {bits}-bit, {rate} Hz, {size} data bytes')
+          PY
+
+      - name: Upload demo render
+        uses: actions/upload-artifact@v4
+        with:
+          name: demo-render-${{ matrix.os }}
+          if-no-files-found: error
+          path: build/replicantsynth_demo.wav
+
+  build:
+    name: Release binary (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libasound2-dev libxkbcommon-dev \
+            libwayland-dev libx11-dev libxcb1-dev libudev-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: |
+          cargo build --release --target ${{ matrix.target }} \
+            -p replicantsynth-desktop -p replicantsynth-core
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/replicantsynth-${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/replicantsynth dist/replicantsynth-${{ matrix.target }}/
+          cp target/${{ matrix.target }}/release/render-demo dist/replicantsynth-${{ matrix.target }}/
+          cp README.md LICENSE NOTICE CHANGELOG.md dist/replicantsynth-${{ matrix.target }}/
+          cp -r assets dist/replicantsynth-${{ matrix.target }}/
+          rm -f dist/replicantsynth-${{ matrix.target }}/assets/replicantsynth_demo.wav
+          tar -C dist -czf replicantsynth-${{ matrix.target }}.tar.gz replicantsynth-${{ matrix.target }}
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/replicantsynth-${{ matrix.target }} | Out-Null
+          Copy-Item target/${{ matrix.target }}/release/replicantsynth.exe dist/replicantsynth-${{ matrix.target }}
+          Copy-Item target/${{ matrix.target }}/release/render-demo.exe dist/replicantsynth-${{ matrix.target }}
+          Copy-Item README.md, LICENSE, NOTICE, CHANGELOG.md dist/replicantsynth-${{ matrix.target }}
+          Copy-Item -Recurse assets dist/replicantsynth-${{ matrix.target }}
+          Remove-Item dist/replicantsynth-${{ matrix.target }}/assets/replicantsynth_demo.wav -ErrorAction SilentlyContinue
+          Compress-Archive -Path dist/replicantsynth-${{ matrix.target }} -DestinationPath replicantsynth-${{ matrix.target }}.zip
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: replicantsynth-${{ matrix.target }}
+          if-no-files-found: error
+          path: |
+            replicantsynth-${{ matrix.target }}.tar.gz
+            replicantsynth-${{ matrix.target }}.zip
+
+  ui:
+    name: Headless UI capture
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    # Software GL under Xvfb is environment-dependent; this job is evidence,
+    # not a release gate.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libasound2-dev libxkbcommon-dev \
+            libwayland-dev libx11-dev libxcb1-dev libudev-dev \
+            xvfb libgl1-mesa-dri
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ui
+
+      - name: Run the app headless and capture a frame
+        run: |
+          xvfb-run -a -s "-screen 0 1600x1000x24" \
+            env REPLICANTSYNTH_SCREENSHOT="$PWD/build/ui-action.png" \
+                REPLICANTSYNTH_SCREENSHOT_FRAMES=90 \
+                REPLICANTSYNTH_SCREENSHOT_SCENE=0 \
+                cargo run --release -p replicantsynth-desktop
+
+      - name: Verify the capture
+        run: |
+          ls -l build/ui-action.png
+          PYTHON="$(command -v python3 || command -v python)"
+          "$PYTHON" - <<'PY'
+          import struct
+          with open('build/ui-action.png', 'rb') as handle:
+              header = handle.read(24)
+          assert header[:8] == b'\x89PNG\r\n\x1a\n', 'not a PNG'
+          width, height = struct.unpack('>II', header[16:24])
+          assert width > 800 and height > 600, f'unexpected size {width}x{height}'
+          print(f'ui capture ok: {width}x{height}')
+          PY
+
+      - name: Upload the capture
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-capture
+          if-no-files-found: error
+          path: build/ui-action.png
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [ lint, test, build ]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the platform bundles
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: replicantsynth-*
+          merge-multiple: true
+
+      - name: Extract the changelog section
+        id: notes
+        run: |
+          PYTHON="$(command -v python3 || command -v python)"
+          "$PYTHON" - <<'PY'
+          import os, re
+          tag = os.environ['GITHUB_REF_NAME']
+          text = open('CHANGELOG.md', encoding='utf-8').read()
+          pattern = re.compile(r'^## \[' + re.escape(tag) + r'\].*?$(.*?)(?=^## \[|\Z)', re.M | re.S)
+          match = pattern.search(text)
+          body = match.group(0).strip() if match else f'ReplicantSynth Desktop {tag}'
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as out:
+              out.write('body<<EOF\n' + body + '\nEOF\n')
+          print(body[:400])
+          PY
+
+      - name: Create the release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ReplicantSynth Desktop ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
+          body: ${{ steps.notes.outputs.body }}
+          draft: false
+          prerelease: false
+          files: |
+            artifacts/replicantsynth-*.tar.gz
+            artifacts/replicantsynth-*.zip

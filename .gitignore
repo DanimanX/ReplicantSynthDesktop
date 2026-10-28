@@ -1,0 +1,14 @@
+# Rust build artefacts
+/target/
+**/*.rs.bk
+
+# The demo render is a build product; the MP3 is the committed artefact.
+/assets/replicantsynth_demo.wav
+
+# Local project files and captures
+/Recordings/
+*.wav.tmp
+
+# OS noise
+.DS_Store
+Thumbs.db

@@ -1,0 +1,25 @@
+[package]
+name = "replicantsynth-desktop"
+description = "ReplicantSynth for the desktop: a cross-platform 64-pad clip launcher"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+default-run = "replicantsynth"
+
+[[bin]]
+name = "replicantsynth"
+path = "src/main.rs"
+
+[dependencies]
+replicantsynth-core = { path = "../replicantsynth-core" }
+eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts", "wayland", "x11"] }
+egui = "0.31"
+cpal = "0.16"
+midir = "0.10"
+rfd = "0.15"
+symphonia = { version = "0.5", default-features = false, features = ["aac", "flac", "isomp4", "mp3", "ogg", "pcm", "vorbis", "wav"] }
+serde_json = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
