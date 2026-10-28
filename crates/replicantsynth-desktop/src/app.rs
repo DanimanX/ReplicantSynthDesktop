@@ -494,7 +494,8 @@ impl App {
             self.handles.master_tap()
         };
         self.handles.set_pad_record_target(target);
-        match RecordingWriter::start(&path, tap, self.audio.sample_rate, 2) {
+        // Live capture: never block the audio callback, drop instead.
+        match RecordingWriter::start(&path, tap, self.audio.sample_rate, 2, false) {
             Ok(writer) => {
                 self.set_status(format!(
                     "capturing {} → {}",

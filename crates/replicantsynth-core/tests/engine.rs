@@ -430,13 +430,20 @@ fn capture_writes_a_24_bit_wav() {
 
     let path = std::env::temp_dir().join("replicantsynth_capture_test.wav");
     let _ = std::fs::remove_file(&path);
+    // Blocking capture: an offline renderer outruns any writer thread, and this
+    // test is about the WAV the recorder produces, not about ring throughput.
     let writer =
-        replicantsynth_core::RecordingWriter::start(&path, handles.master_tap(), 48_000, 2)
+        replicantsynth_core::RecordingWriter::start(&path, handles.master_tap(), 48_000, 2, true)
             .expect("capture starts");
 
     render(&mut engine, 1.5, 256);
     let writer = writer.stop();
-    assert!(writer.frames() > 40_000, "capture has frames");
+    assert!(
+        writer.frames() >= 48_000 * 3 / 2 - 1024,
+        "capture kept the whole take: {} frames",
+        writer.frames()
+    );
+    assert_eq!(writer.dropped(), 0, "blocking capture drops nothing");
 
     let bytes = std::fs::read(&path).expect("capture file exists");
     assert_eq!(&bytes[0..4], b"RIFF");

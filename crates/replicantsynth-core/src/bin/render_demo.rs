@@ -111,7 +111,9 @@ fn main() {
     if let Some(parent) = args.out.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let writer = match RecordingWriter::start(&args.out, handles.master_tap(), SAMPLE_RATE, 2) {
+    // Offline: block rather than drop, so the take is exactly as long as asked.
+    let writer = match RecordingWriter::start(&args.out, handles.master_tap(), SAMPLE_RATE, 2, true)
+    {
         Ok(writer) => writer,
         Err(err) => {
             eprintln!("cannot start capture: {err}");

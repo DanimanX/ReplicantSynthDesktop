@@ -60,6 +60,20 @@ impl RecordTap {
         self.active.store(active, Ordering::Release);
     }
 
+    /// In blocking mode a full ring spins instead of dropping frames.
+    ///
+    /// The audio thread must never block, so this stays off for live capture.
+    /// Offline renders (the demo renderer and the test suite) push far faster
+    /// than any writer thread can drain, and there correctness beats
+    /// non-blocking: they set it, live capture does not.
+    pub fn set_blocking(&self, blocking: bool) {
+        self.blocking.store(blocking, Ordering::Release);
+    }
+
+    pub fn is_blocking(&self) -> bool {
+        self.blocking.load(Ordering::Relaxed)
+    }
+
     pub fn is_active(&self) -> bool {
         self.active.load(Ordering::Acquire)
     }
@@ -154,11 +168,17 @@ pub struct RecordingWriter {
 }
 
 impl RecordingWriter {
+    /// Start a capture.
+    ///
+    /// `blocking` must be `false` for live capture (the audio callback may never
+    /// wait) and `true` for offline rendering, where the producer is faster than
+    /// the disk and dropping would silently truncate the take.
     pub fn start(
         path: &Path,
         tap: Arc<RecordTap>,
         sample_rate: u32,
         channels: u16,
+        blocking: bool,
     ) -> io::Result<Self> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
@@ -170,6 +190,7 @@ impl RecordingWriter {
         file.write_all(&wav_header(sample_rate, channels, 0))?;
 
         tap.reset();
+        tap.set_blocking(blocking);
         tap.set_active(true);
 
         let stop_flag = Arc::new(AtomicBool::new(false));
@@ -282,6 +303,7 @@ impl RecordingWriter {
         }
         self.stop_flag.store(true, Ordering::Release);
         self.tap.set_active(false);
+        self.tap.set_blocking(false);
         if let Some(handle) = self.thread.take() {
             let _ = handle.join();
         }
