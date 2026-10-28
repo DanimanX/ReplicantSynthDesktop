@@ -1556,14 +1556,24 @@ impl App {
         if self.window_parent.is_some() {
             return;
         }
-        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-        let Ok(handle) = frame.window_handle() else {
-            return;
-        };
-        match handle.as_raw() {
-            RawWindowHandle::Xlib(xlib) => self.window_parent = Some(xlib.window),
-            RawWindowHandle::Xcb(xcb) => self.window_parent = Some(u64::from(xcb.window.get())),
-            _ => {}
+        // Embedding is implemented for X11 only. That also keeps this code off
+        // macOS and Windows, where the handle types differ (`c_ulong` is 32-bit
+        // on Windows) and there is nothing to embed into yet.
+        #[cfg(target_os = "linux")]
+        {
+            use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            let Ok(handle) = frame.window_handle() else {
+                return;
+            };
+            self.window_parent = match handle.as_raw() {
+                RawWindowHandle::Xlib(xlib) => Some(u64::from(xlib.window as u32)),
+                RawWindowHandle::Xcb(xcb) => Some(u64::from(xcb.window.get())),
+                _ => None,
+            };
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = frame;
         }
     }
 
