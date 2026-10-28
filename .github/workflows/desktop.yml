@@ -139,9 +139,9 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build
-        run: |
-          cargo build --release --target ${{ matrix.target }} \
-            -p replicantsynth-desktop -p replicantsynth-core
+        # One line on purpose: the default shell on Windows is PowerShell, which
+        # does not treat a trailing backslash as a line continuation.
+        run: cargo build --release --target ${{ matrix.target }} -p replicantsynth-desktop -p replicantsynth-core
 
       - name: Package (unix)
         if: runner.os != 'Windows'
