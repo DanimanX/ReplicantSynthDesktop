@@ -128,6 +128,11 @@ trait Backend {
     fn poll_param_changes(&mut self) -> Vec<(u32, f64)> {
         Vec::new()
     }
+    /// Every current parameter value, for when the plugin's values changed
+    /// wholesale — loading a state blob, most of all — and no edit was reported.
+    fn read_all_params(&mut self) -> Vec<(u32, f64)> {
+        Vec::new()
+    }
 }
 
 impl Backend for clap_backend::ClapRuntime {
@@ -172,6 +177,9 @@ impl Backend for clap_backend::ClapRuntime {
     fn poll_param_changes(&mut self) -> Vec<(u32, f64)> {
         self.poll_param_changes()
     }
+    fn read_all_params(&mut self) -> Vec<(u32, f64)> {
+        self.read_all_params()
+    }
 }
 
 impl Backend for vst3_backend::Vst3Runtime {
@@ -215,6 +223,9 @@ impl Backend for vst3_backend::Vst3Runtime {
     }
     fn poll_param_changes(&mut self) -> Vec<(u32, f64)> {
         self.poll_param_changes()
+    }
+    fn read_all_params(&mut self) -> Vec<(u32, f64)> {
+        self.read_all_params()
     }
 }
 
@@ -358,7 +369,13 @@ impl HostedPlugin {
     }
 
     pub fn restore_state(&mut self, data: &[u8]) -> Result<(), PluginError> {
-        self.backend.restore_state(data)
+        self.backend.restore_state(data)?;
+        // A state blob moves every parameter at once and reports none of them,
+        // so the cached list has to be re-read or the panel keeps showing the
+        // values the plugin had before the project was reopened.
+        let values = self.backend.read_all_params();
+        apply_param_values(&mut self.params, &values);
+        Ok(())
     }
 
     pub fn blocks_processed(&self) -> u64 {
@@ -486,6 +503,8 @@ mod tests {
     struct ScriptedBackend {
         params: Vec<PluginParam>,
         reports: std::collections::VecDeque<Vec<(u32, f64)>>,
+        /// What a state restore leaves behind, read back in full.
+        after_restore: Vec<(u32, f64)>,
     }
 
     impl Backend for ScriptedBackend {
@@ -523,6 +542,9 @@ mod tests {
         fn poll_param_changes(&mut self) -> Vec<(u32, f64)> {
             self.reports.pop_front().unwrap_or_default()
         }
+        fn read_all_params(&mut self) -> Vec<(u32, f64)> {
+            self.after_restore.clone()
+        }
     }
 
     struct SilentProcessor;
@@ -550,6 +572,7 @@ mod tests {
             backend: Box::new(ScriptedBackend {
                 params: params.clone(),
                 reports: reports.into(),
+                after_restore: Vec::new(),
             }),
             worker: crate::worker::PluginWorker::spawn(
                 Box::new(SilentProcessor),
@@ -568,6 +591,21 @@ mod tests {
         assert!(plugin.sync_params());
         assert_eq!(plugin.params()[1].value, 0.9);
         assert_eq!(plugin.params()[0].value, 0.0);
+    }
+
+    #[test]
+    fn restoring_state_refreshes_the_whole_list() {
+        // A state blob moves every parameter and reports none of them, so the
+        // panel would keep the values the plugin had when it was loaded.
+        let mut plugin = scripted(vec![Vec::new()]);
+        plugin.backend = Box::new(ScriptedBackend {
+            params: plugin.params.clone(),
+            reports: Default::default(),
+            after_restore: vec![(1, 0.75), (2, 0.1)],
+        });
+        plugin.restore_state(&[1, 2, 3]).expect("restore");
+        assert_eq!(plugin.params()[0].value, 0.75);
+        assert_eq!(plugin.params()[1].value, 0.1);
     }
 
     #[test]

@@ -261,6 +261,11 @@ pub struct EngineShared {
     pub master_gain: AtomicU32,
     pub sample_rate: AtomicU32,
     pub max_block: AtomicU32,
+    /// Pads whose hosted plugin must keep processing even while the pad is
+    /// stopped. A plugin with its editor open has to run: its editor and its
+    /// parameter reports only move while it processes, so a stopped pad with a
+    /// visible editor would otherwise show a frozen parameter list.
+    plugin_awake: [AtomicBool; PADS],
     /// UI -> engine: attach or detach a hosted plugin bridge.
     plugin_tx: Sender<PluginHostCommand>,
     plugin_rx: Mutex<Option<Receiver<PluginHostCommand>>>,
@@ -288,6 +293,7 @@ impl EngineShared {
             master_gain: AtomicU32::new(0.85f32.to_bits()),
             sample_rate: AtomicU32::new(48_000),
             max_block: AtomicU32::new(512),
+            plugin_awake: std::array::from_fn(|_| AtomicBool::new(false)),
             plugin_tx,
             plugin_rx: Mutex::new(Some(plugin_rx)),
             plugin_retired_tx,
@@ -317,6 +323,20 @@ impl EngineShared {
         if let Ok(receiver) = self.plugin_retired_rx.lock() {
             while receiver.try_recv().is_ok() {}
         }
+    }
+
+    /// Keep this pad's plugin processing while the pad is stopped.
+    pub fn set_plugin_awake(&self, pad: usize, awake: bool) {
+        if let Some(slot) = self.plugin_awake.get(pad) {
+            slot.store(awake, Ordering::Relaxed);
+        }
+    }
+
+    /// Whether a stopped pad still has to run its plugin.
+    pub fn plugin_awake(&self, pad: usize) -> bool {
+        self.plugin_awake
+            .get(pad)
+            .is_some_and(|slot| slot.load(Ordering::Relaxed))
     }
 
     pub fn tempo(&self) -> f32 {
@@ -397,6 +417,12 @@ impl EngineHandles {
     /// Channel the UI uses to attach or detach hosted plugins.
     pub fn plugin_sender(&self) -> Sender<PluginHostCommand> {
         self.shared.plugin_sender()
+    }
+
+    /// Keep a pad's plugin processing while the pad is stopped, which is what
+    /// keeps its editor alive and its parameter reports flowing.
+    pub fn set_plugin_awake(&self, pad: usize, awake: bool) {
+        self.shared.set_plugin_awake(pad, awake);
     }
 
     /// Drop the bridges the engine has detached, which releases the plugin

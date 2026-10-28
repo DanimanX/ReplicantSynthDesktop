@@ -322,7 +322,6 @@ impl App {
                 Some(descriptor) => {
                     let pad = app.selected;
                     app.load_plugin(pad, &descriptor);
-                    app.plugin_editor = Some(pad);
                 }
                 None => eprintln!("REPLICANTSYNTH_PLUGIN={query}: no matching plugin"),
             }
@@ -391,6 +390,48 @@ impl App {
         self.set_status(format!("pad {:02} → {}", pad + 1, kind.label()));
     }
 
+    /// Whether this pad's editor has to be a window of its own.
+    ///
+    /// Wayland has no X11 parent to embed into, and some plugins only implement
+    /// floating editors; in both cases the plugin draws its own window and the
+    /// application keeps its layout.
+    pub fn plugin_editor_is_detached(&self, pad: usize) -> bool {
+        if self.window_parent.is_none() {
+            return true;
+        }
+        self.plugins
+            .get(pad)
+            .is_some_and(|loaded| loaded.plugin.is_floating())
+    }
+
+    /// Open a pad's plugin editor, detached or embedded as the plugin requires.
+    pub fn open_plugin_editor(&mut self, pad: usize) {
+        if self.plugin_editor_is_detached(pad) {
+            // Nothing to embed: open the plugin's own window now, and leave the
+            // rest of the UI alone so the parameter list stays readable.
+            let (width, height) = self.plugins.preferred_size(pad).unwrap_or((900, 560));
+            let rect = replicantsynth_host::EditorRect {
+                x: 0,
+                y: 0,
+                width: width.max(160),
+                height: height.max(120),
+            };
+            if !self.plugins.open_editor(pad, None, rect) {
+                let message = self
+                    .plugins
+                    .get(pad)
+                    .and_then(|loaded| loaded.error.clone())
+                    .unwrap_or_else(|| "the plugin refused to open its editor".to_string());
+                self.set_status(message);
+                // Do not keep asking: the panel returns to normal and the
+                // editor stays closed until the user tries again.
+                self.plugin_editor = None;
+                return;
+            }
+        }
+        self.plugin_editor = Some(pad);
+    }
+
     /// Load a plugin onto a pad and make the pad a plugin clip.
     pub fn load_plugin(&mut self, pad: usize, descriptor: &replicantsynth_host::PluginDescriptor) {
         // A Wayland window cannot parent an X11 child, so ask for a detached
@@ -423,8 +464,8 @@ impl App {
                     descriptor.name,
                     pad + 1
                 ));
-                self.plugin_editor = Some(pad);
                 self.windows.plugin_browser = false;
+                self.open_plugin_editor(pad);
                 self.dirty = true;
             }
             Err(error) => self.set_status(format!("cannot load plugin: {error}")),
@@ -1293,14 +1334,19 @@ impl App {
     }
 
     fn central(&mut self, ctx: &egui::Context) {
-        // A plugin editor gets the whole window: these editors are often wider
-        // than the grid column, and a clipped synth panel is useless.
+        // An *embedded* plugin editor gets the whole window: these editors are
+        // often wider than the grid column, and a clipped synth panel is useless.
+        // A detached editor is a window of its own, so there is nothing to embed
+        // and no reason to hide the grid and the inspector — hiding them would
+        // also hide the parameter list that follows the plugin's own GUI.
+        if let Some(pad) = self.plugin_editor {
+            if !self.plugins.is_loaded(pad) {
+                self.plugin_editor = None;
+            }
+        }
         let editing = self
             .plugin_editor
-            .filter(|pad| self.plugins.is_loaded(*pad));
-        if editing.is_none() {
-            self.plugin_editor = None;
-        }
+            .filter(|pad| !self.plugin_editor_is_detached(*pad));
         if let Some(pad) = editing {
             egui::CentralPanel::default()
                 .frame(
@@ -1360,7 +1406,7 @@ impl App {
                     self.windows.editor = true;
                 }
                 if let Some(pad) = response.plugin_editor {
-                    self.plugin_editor = Some(pad);
+                    self.open_plugin_editor(pad);
                 }
                 if let Some(pad) = response.context {
                     self.windows.pad_menu = Some(pad);
@@ -1692,6 +1738,14 @@ impl eframe::App for App {
             // inspector's copy of the parameters in step with the drag instead
             // of waiting for the next idle repaint.
             ctx.request_repaint();
+        }
+        // Keep a detached editor open: loading a project replaces the plugin
+        // instance underneath an open editor, which takes the editor's window
+        // with it. Without this the panel would claim an editor that is gone.
+        if let Some(pad) = self.plugin_editor {
+            if self.plugin_editor_is_detached(pad) && !self.plugins.editor_open(pad) {
+                self.open_plugin_editor(pad);
+            }
         }
         for pad in self.plugins.take_closed_editors() {
             if self.plugin_editor == Some(pad) {

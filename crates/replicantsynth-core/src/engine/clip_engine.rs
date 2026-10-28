@@ -25,6 +25,9 @@ pub const FX_PARAM_BASE: usize = 24;
 pub const FX_ENABLED_INDEX: usize = 30;
 
 const FX_ID_BYPASS: usize = 0;
+/// `ClipKind::Plugin` as a clip stores it, so the sample loop compares against a
+/// constant instead of re-matching the enum 64 times per sample.
+const KIND_PLUGIN: i32 = 5;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ClipStep {
@@ -894,6 +897,12 @@ impl ClipEngine {
         let any_solo = self.clips.iter().any(|clip| clip.solo);
         let sample_rate = self.sample_rate;
         let samples = &self.shared.samples;
+        // Read once per chunk rather than once per sample: the flag only changes
+        // when an editor opens or closes.
+        let mut awake_pads = [false; PADS];
+        for (pad, awake) in awake_pads.iter_mut().enumerate() {
+            *awake = self.shared.plugin_awake(pad);
+        }
 
         for i in 0..frames {
             let mut mix_l = 0.0f64;
@@ -901,13 +910,18 @@ impl ClipEngine {
             let mut captured_l = 0.0f32;
             let mut captured_r = 0.0f32;
 
-            for pad in 0..PADS {
+            for (pad, awake) in awake_pads.iter().copied().enumerate() {
                 let clip = &mut self.clips[pad];
                 if clip.kind == 0 {
                     continue;
                 }
                 let playing = clip.state == 2;
-                if !playing && clip.tail_samples <= 0.0 {
+                // A hosted plugin whose editor is open keeps running even while
+                // its pad is stopped: the plugin's own GUI drives the parameters
+                // through its `process()` cycle, and a frozen plugin means a
+                // frozen parameter list. Its audio is dropped below.
+                let awake = awake && clip.kind == KIND_PLUGIN;
+                if !playing && clip.tail_samples <= 0.0 && !awake {
                     continue;
                 }
 
@@ -933,8 +947,12 @@ impl ClipEngine {
                             bridge.playing = clip.state == 2;
                             bridge.position = bridge.position.wrapping_add(1);
                             let (out_l, out_r) = bridge.tick(0.0, 0.0);
-                            l = out_l;
-                            r = out_r;
+                            // Awake but not playing: the plugin keeps working,
+                            // the pad stays silent.
+                            if playing || clip.tail_samples > 0.0 {
+                                l = out_l;
+                                r = out_r;
+                            }
                         }
                     }
                     ClipKind::Sample => {

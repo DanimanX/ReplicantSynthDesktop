@@ -121,11 +121,25 @@ lock-free queue and are applied as CLAP parameter events, or `setParameter` call
 for VST3, before the next block.
 
 Edits also travel the other way. A value the user moves inside the plugin's own
-editor is pulled back into the knob row: VST3 plugins report those edits through
-`IComponentHandler::performEdit`, which the host drains every frame; CLAP has no
-such notification, so a CLAP plugin's values are read back at about 20 Hz while
-it is loaded. Either way the panel follows the plugin instead of showing the
-values it had at load time.
+editor is pulled back into the knob row, three ways depending on what the plugin
+does with the news:
+
+- **VST3**: the plugin reports the edit through `IComponentHandler::performEdit`.
+  The host drains those every frame.
+- **CLAP, reported**: the plugin writes a `PARAM_VALUE` event into the output
+  event list of `process()`, or raises `request_flush` for the host to answer with
+  `params.flush()`. Both are collected on the worker thread — that is the only
+  thread holding the handles a flush needs — and handed to the UI.
+- **CLAP, silent**: some plugins change a value without telling anyone, so the
+  values are also read back at about 20 Hz as a fallback.
+
+For a plugin to report anything, it has to be running: its reports are written
+during `process()`. The engine therefore keeps a pad's plugin processing for as
+long as its editor is open, even when the pad is stopped — which is also what
+keeps a synth's editor alive — while a stopped pad stays out of the mix.
+
+After a state blob is replayed, every parameter value is read back once, because
+loading a state moves them all and reports none of them.
 
 A plugin with thousands of parameters (Dexed reports 2238) is meant to be edited
 in its own editor; the knob row is for quick access to the first few.

@@ -111,6 +111,16 @@ struct RegisteredTimer {
 struct HostState {
     requests: Sender<GuiRequest>,
     restart: AtomicBool,
+    /// Parameter values the plugin reported through its editor, waiting for the
+    /// UI thread to fold them into its own list. CLAP delivers those two ways —
+    /// a `PARAM_VALUE` event in `process()`'s output list, or a `request_flush`
+    /// that the host answers with `params.flush()` — and both are drained here.
+    /// Without this the host had no idea the plugin's GUI had moved anything:
+    /// the values it showed were the ones read when the plugin was loaded.
+    param_reports: Mutex<Vec<(u32, f64)>>,
+    /// Set by `request_flush`. The flush itself has to happen on the thread that
+    /// owns the audio processor, so the flag is carried to the worker.
+    flush_requested: AtomicBool,
     /// Timers the plugin registered; the host pumps them while an editor is open.
     timers: Mutex<Vec<RegisteredTimer>>,
     next_timer_id: AtomicU32,
@@ -203,7 +213,13 @@ impl HostGuiImpl for ClapHostShared {
 }
 
 impl HostParamsImplShared for ClapHostShared {
-    fn request_flush(&self) {}
+    fn request_flush(&self) {
+        // The plugin's own editor changed a parameter and wants the host to
+        // collect it. The audio processor is what answers a flush, so hand the
+        // request to the worker thread rather than dropping it here — this
+        // callback runs on the plugin's GUI thread and owns no such handle.
+        self.state.flush_requested.store(true, Ordering::Release);
+    }
 }
 
 impl HostParamsImplMainThread for ClapHostMain<'_> {
@@ -303,6 +319,12 @@ pub struct ClapProcessor {
     input_channels: Vec<Vec<f32>>,
     output_channels: Vec<Vec<f32>>,
     events: EventBuffer,
+    /// The plugin's outgoing events. It is here, not `OutputEvents::void()`,
+    /// because this is where a plugin reports a parameter its own editor
+    /// changed: dropping the list dropped every edit made inside the GUI.
+    out_events: EventBuffer,
+    /// The queue the UI thread drains, plus the flush request the plugin raised.
+    state: std::sync::Arc<HostState>,
     note_port: u16,
     pending_params: Vec<(u32, f32)>,
     frames: usize,
@@ -315,6 +337,7 @@ impl ClapProcessor {
         layout: PortLayout,
         note_port: u16,
         frames: usize,
+        state: std::sync::Arc<HostState>,
     ) -> Self {
         let frames = frames.max(1);
         let input_channels = layout
@@ -334,11 +357,63 @@ impl ClapProcessor {
             input_channels,
             output_channels,
             events: EventBuffer::with_capacity(64),
+            out_events: EventBuffer::with_capacity(64),
+            state,
             note_port,
             pending_params: Vec::new(),
             frames,
             counter: 0,
         }
+    }
+
+    /// Queue the parameter values the plugin reported in `events`.
+    ///
+    /// Runs on the worker thread, never on the audio callback, so taking the
+    /// lock costs the device nothing.
+    fn collect_param_reports(&mut self) {
+        if self.out_events.is_empty() {
+            return;
+        }
+        let Some(mut reports) = self.state.param_reports.lock().ok() else {
+            return;
+        };
+        for unknown in self.out_events.iter() {
+            let Some(event) = unknown.as_event::<ParamValueEvent>() else {
+                continue;
+            };
+            let Some(id) = event.param_id() else {
+                continue;
+            };
+            reports.push((id.get(), event.value()));
+        }
+    }
+
+    /// Answer a flush the plugin asked for, which is how a plugin hands over
+    /// the parameters its own editor changed.
+    ///
+    /// CLAP says the host must react to `request_flush` by calling either
+    /// `flush()` or `process()`; the processor handle needed for `flush()` only
+    /// exists on this thread, and the call is sequential with `process()` — never
+    /// concurrent with it — so it is safe here.
+    fn flush_if_requested(&mut self) {
+        if !self.state.flush_requested.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        let Some(params) = self
+            .processor
+            .plugin_handle()
+            .get_extension::<PluginParams>()
+        else {
+            return;
+        };
+        let mut handle = self.processor.plugin_handle();
+        self.out_events.clear();
+        params.flush_active(
+            &mut handle,
+            &InputEvents::empty(),
+            &mut self.out_events.as_output(),
+        );
+        self.collect_param_reports();
     }
 
     fn build_events(&mut self, block: &replicantsynth_core::engine::PluginBlock) {
@@ -430,6 +505,7 @@ impl PluginProcessor for ClapProcessor {
         if frames == 0 {
             return;
         }
+        self.flush_if_requested();
         self.clear_buffers(frames);
         self.write_input(block, frames);
         self.build_events(block);
@@ -464,15 +540,21 @@ impl PluginProcessor for ClapProcessor {
                 }));
 
         let input_events = self.events.as_input();
-        let mut output_events = OutputEvents::void();
-        let result = self.processor.process(
-            &input_buffers,
-            &mut output_buffers,
-            &input_events,
-            &mut output_events,
-            Some(self.counter),
-            None,
-        );
+        self.out_events.clear();
+        let result = {
+            let mut output_events = self.out_events.as_output();
+            self.processor.process(
+                &input_buffers,
+                &mut output_buffers,
+                &input_events,
+                &mut output_events,
+                Some(self.counter),
+                None,
+            )
+        };
+        // Whatever the plugin reported on the way out — including a parameter
+        // its editor moved — is handed to the UI before the next block.
+        self.collect_param_reports();
         if result.is_ok() {
             self.write_output(block, frames);
         }
@@ -532,6 +614,8 @@ impl ClapRuntime {
         let state = std::sync::Arc::new(HostState {
             requests: requests_tx,
             restart: AtomicBool::new(false),
+            param_reports: Mutex::new(Vec::new()),
+            flush_requested: AtomicBool::new(false),
             timers: Mutex::new(Vec::new()),
             next_timer_id: AtomicU32::new(1),
             #[cfg(unix)]
@@ -577,6 +661,9 @@ impl ClapRuntime {
             .map_err(|error| PluginError::Audio(error.to_string()))?;
 
         let gui = instance.access_handler(|handler| handler.gui.get());
+        // The worker answers the plugin's flushes with this state; the UI thread
+        // reads the reports out of the other end of it.
+        let processor = ClapProcessor::new(processor, layout, note_port, max_block, state.clone());
         let runtime = Self {
             instance,
             gui,
@@ -591,7 +678,6 @@ impl ClapRuntime {
             posix_fd: None,
             state,
         };
-        let processor = ClapProcessor::new(processor, layout, note_port, max_block);
         Ok((runtime, Box::new(processor) as Box<dyn PluginProcessor>))
     }
 
@@ -876,6 +962,26 @@ impl ClapRuntime {
             .map_err(|error| PluginError::State(error.to_string()))
     }
 
+    /// Read every parameter value from the plugin, in each parameter's own
+    /// range.
+    ///
+    /// Used after the plugin's state is replaced: that moves every parameter and
+    /// reports none of them.
+    pub fn read_all_params(&mut self) -> Vec<(u32, f64)> {
+        let Some(params) = self.instance.access_handler(|handler| handler.params.get()) else {
+            return Vec::new();
+        };
+        let handle = self.instance.plugin_handle();
+        self.params
+            .iter()
+            .filter_map(|param| {
+                params
+                    .get_value(&handle, ClapId::new(param.id))
+                    .map(|value| (param.id, value))
+            })
+            .collect()
+    }
+
     /// Read back every parameter value and report the ones that moved, in each
     /// parameter's own range.
     ///
@@ -886,11 +992,21 @@ impl ClapRuntime {
     /// runs at ~20 Hz — fast enough that a dragged knob visibly follows on the
     /// next repaint, cheap enough to leave the UI thread alone.
     pub fn poll_param_changes(&mut self) -> Vec<(u32, f64)> {
+        // What the plugin reported itself comes first: it is authoritative, it
+        // costs nothing, and it is the only signal for a plugin that changes
+        // values without the host ever asking.
+        let mut changes = self
+            .state
+            .param_reports
+            .lock()
+            .map(|mut reports| std::mem::take(&mut *reports))
+            .unwrap_or_default();
+
         const INTERVAL: Duration = Duration::from_millis(50);
         let now = Instant::now();
         if let Some(last) = self.last_param_poll {
             if now.duration_since(last) < INTERVAL {
-                return Vec::new();
+                return changes;
             }
         }
         self.last_param_poll = Some(now);
@@ -899,7 +1015,6 @@ impl ClapRuntime {
             return Vec::new();
         };
         let handle = self.instance.plugin_handle();
-        let mut changes = Vec::new();
         for param in self.params.iter_mut() {
             let Some(value) = params.get_value(&handle, ClapId::new(param.id)) else {
                 continue;

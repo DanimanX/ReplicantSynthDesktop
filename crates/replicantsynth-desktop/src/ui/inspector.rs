@@ -630,7 +630,7 @@ fn plugin_sound(ui: &mut Ui, app: &mut App, pad: usize) {
                 app.plugins.close_editor(pad);
                 app.plugin_editor = None;
             } else {
-                app.plugin_editor = Some(pad);
+                app.open_plugin_editor(pad);
             }
         }
         if chip(ui, "REPLACE", false).clicked() {

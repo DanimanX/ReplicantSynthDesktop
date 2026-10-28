@@ -165,6 +165,7 @@ impl PluginManager {
         let _ = handles
             .plugin_sender()
             .send(PluginHostCommand::Remove { pad: pad as u8 });
+        handles.set_plugin_awake(pad, false);
         if let Some(mut loaded) = self.loaded.remove(&pad) {
             loaded.plugin.shut_down();
         }
@@ -178,7 +179,8 @@ impl PluginManager {
                 .plugin_sender()
                 .send(PluginHostCommand::Remove { pad: *pad as u8 });
         }
-        for (_, mut loaded) in self.loaded.drain() {
+        for (pad, mut loaded) in self.loaded.drain() {
+            handles.set_plugin_awake(pad, false);
             loaded.plugin.shut_down();
         }
         handles.drain_retired_bridges();
@@ -196,6 +198,11 @@ impl PluginManager {
         let mut closed = Vec::new();
         for (pad, loaded) in self.loaded.iter_mut() {
             loaded.plugin.service();
+            // A plugin has to keep processing while its editor is open: the
+            // editor drives it, and it only reports the parameters the user
+            // turns from inside its own `process()` cycle. The engine renders a
+            // stopped pad only while this flag is set.
+            handles.set_plugin_awake(*pad, loaded.plugin.editor_open());
             if loaded.plugin.sync_params() && loaded.plugin.editor_open() {
                 moved = true;
             }
@@ -254,6 +261,13 @@ impl PluginManager {
             loaded.rect = rect;
             loaded.plugin.set_editor_rect(rect);
         }
+    }
+
+    /// Whether this pad's plugin editor is currently open.
+    pub fn editor_open(&self, pad: usize) -> bool {
+        self.loaded
+            .get(&pad)
+            .is_some_and(|loaded| loaded.plugin.editor_open())
     }
 
     pub fn close_editor(&mut self, pad: usize) {

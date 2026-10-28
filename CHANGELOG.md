@@ -4,6 +4,37 @@ All notable changes to ReplicantSynth Desktop are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.5] — 2026-10-28
+
+### Fixed
+
+- **A hosted plugin only ran while its pad was playing.** The engine skips clips
+  that are not playing and have no tail, which meant a plugin whose editor was
+  open but whose pad was stopped was never processed. A plugin reports the
+  parameters its own GUI moves from inside that cycle, so turning a knob in
+  Bazille's editor left the *PARAMETERS* row frozen at the values it had when the
+  plugin was loaded — *Output* stayed at 50% no matter what. A pad's plugin now
+  keeps processing while its editor is open, and stops again when it closes; it
+  stays silent throughout, because a stopped pad is still not mixed in.
+- **CLAP parameter reports were thrown away.** `process()` was called with
+  `OutputEvents::void()`, so a `PARAM_VALUE` event the plugin wrote on its way out
+  — which is how a CLAP plugin reports an edit made in its own editor — went
+  nowhere. `request_flush` was also a no-op, though CLAP requires the host to
+  answer it with `params.flush()`. Both are now collected on the worker thread and
+  handed to the UI.
+- **Reopening a project left the parameters at their load-time values.** Replaying
+  a state blob moves every parameter and reports none of them, so the panel kept
+  showing what the plugin had before the state was loaded. The values are now
+  re-read after a restore.
+
+### Changed
+
+- **A detached plugin editor no longer takes over the window.** When the editor is
+  a window of its own — Wayland, or a plugin that only draws detached — the pad
+  grid and the inspector stay on screen, so the parameter list is visible while
+  the plugin's GUI is being used. Embedding still claims the window, where there
+  is an X11 parent to embed into.
+
 ## [0.0.4] — 2026-10-28
 
 ### Fixed

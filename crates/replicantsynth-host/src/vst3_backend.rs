@@ -526,6 +526,26 @@ impl Vst3Runtime {
             .map_err(|error| PluginError::State(error.to_string()))
     }
 
+    /// Read every parameter value from the plugin.
+    ///
+    /// Used after the plugin's state is replaced: that moves every parameter and
+    /// reports none of them, so the panel would otherwise keep the load-time
+    /// values until the user turned something.
+    pub fn read_all_params(&mut self) -> Vec<(u32, f64)> {
+        let Ok(plugin) = self.plugin.lock() else {
+            return Vec::new();
+        };
+        plugin
+            .get_parameters()
+            .map(|parameters| {
+                parameters
+                    .into_iter()
+                    .map(|parameter| (parameter.id, parameter.value))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Parameter edits the plugin's own editor reported since the last call,
     /// as `(id, normalized value)`.
     ///

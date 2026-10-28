@@ -552,3 +552,70 @@ fn demo_project_renders_through_the_engine() {
     assert!(peaks.peak > 0.05, "demo render audible: {}", peaks.peak);
     assert!(peaks.peak <= 1.01, "demo render bounded: {}", peaks.peak);
 }
+
+/// A stopped pad with a hosted plugin does not run the plugin — until its editor
+/// is open, which is the only thing that keeps a plugin's own GUI alive and its
+/// parameter reports flowing.
+#[test]
+fn a_stopped_plugin_pad_runs_only_while_its_editor_is_open() {
+    use replicantsynth_core::engine::{bridge_pair, PluginHostCommand};
+    use replicantsynth_core::model::ClipKind;
+
+    let (mut engine, handles) = create_engine(48_000.0, 512);
+    let mut project = ProjectState::new();
+    project.clips[0].kind = ClipKind::Plugin;
+    sync_project(&handles, &project);
+
+    let (bridge, blocks_in, blocks_out) = bridge_pair(1);
+    drop(blocks_out);
+    handles
+        .plugin_sender()
+        .send(PluginHostCommand::Install {
+            pad: 0,
+            bridge: Box::new(bridge),
+        })
+        .expect("install");
+
+    // Stopped, no editor: the plugin is left alone, block by block.
+    let picked_up = render(&mut engine, 0.25, 512);
+    assert!(picked_up.peak.abs() < 1.0e-6, "a stopped pad stays silent");
+    let queued = {
+        let mut count = 0;
+        while blocks_in.try_recv().is_ok() {
+            count += 1;
+        }
+        count
+    };
+    assert_eq!(
+        queued, 0,
+        "a stopped pad with a closed editor sends nothing"
+    );
+
+    // Editor open: the plugin runs so that it can report what its GUI does...
+    handles.set_plugin_awake(0, true);
+    let awake = render(&mut engine, 0.25, 512);
+    let mut blocks = 0;
+    while let Ok(block) = blocks_in.try_recv() {
+        assert_eq!(
+            block.frames,
+            replicantsynth_core::engine::PLUGIN_BLOCK_FRAMES
+        );
+        blocks += 1;
+    }
+    assert!(blocks > 0, "an awake plugin pad feeds its worker");
+    // ...and stays silent, because the pad is still not playing.
+    assert!(
+        awake.peak.abs() < 1.0e-6,
+        "an awake but stopped pad is not mixed in: {}",
+        awake.peak
+    );
+
+    // Closing the editor puts it back to sleep.
+    handles.set_plugin_awake(0, false);
+    let _ = render(&mut engine, 0.25, 512);
+    let mut late = 0;
+    while blocks_in.try_recv().is_ok() {
+        late += 1;
+    }
+    assert_eq!(late, 0, "a closed editor stops the idle processing again");
+}
